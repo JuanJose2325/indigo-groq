@@ -1,10 +1,6 @@
 # Groq Cloud API — fork con cadena de respaldo
 
-[![Abrir en HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=TU-USUARIO&repository=indigo-groq&category=integration)
-
-> **Antes de publicar:** en el enlace de arriba cambiá `TU-USUARIO` por tu usuario
-> de GitHub y `indigo-groq` por el nombre del repositorio, si le ponés otro. Ese
-> botón no funciona hasta que el repositorio exista en GitHub.
+[![Abrir en HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=JuanJose2325&repository=indigo-groq&category=integration)
 
 Agente de conversación para Home Assistant que habla con
 [Groq](https://groq.com). Es un fork de
