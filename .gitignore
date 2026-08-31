@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+# Nunca versionar credenciales: las de Cloudflare y la de Groq se cargan
+# desde la interfaz de Home Assistant, no desde archivos de este repo.
+.env
+*.token

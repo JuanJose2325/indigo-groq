@@ -1,0 +1,64 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "This API key is already configured"
+    },
+    "step": {
+      "user": {
+        "data": {
+          "api_key": "API key"
+        },
+        "description": "Enter your Groq Cloud API key to get started."
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "invalid_auth": "Invalid API key",
+      "unauthorized": "API key does not have required permissions",
+      "unknown": "Unexpected error"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "prompt": "Instructions",
+          "chat_model": "Model",
+          "max_tokens": "Maximum tokens to return in response",
+          "temperature": "Temperature",
+          "top_p": "Top P",
+          "llm_hass_api": "Control Home Assistant",
+          "supports_reasoning": "Model supports reasoning effort (e.g., qwen3-32b, gpt-oss)",
+          "reasoning_effort": "Reasoning effort",
+          "history_budget": "History budget (tokens)",
+          "model_chain": "Fallback models",
+          "model_cooldown": "Model cooldown (seconds)",
+          "cf_account_id": "Cloudflare account ID",
+          "cf_api_token": "Cloudflare API token",
+          "cf_model": "Cloudflare model"
+        },
+        "data_description": {
+          "prompt": "Instruct how the LLM should respond. This can be a template.",
+          "llm_hass_api": "Allow the model to interact with Home Assistant.",
+          "chat_model": "Select the Groq model to use for conversations.",
+          "max_tokens": "Maximum number of tokens the model can generate in a response.",
+          "temperature": "Higher values make output more random, lower values more deterministic.",
+          "top_p": "Nucleus sampling: consider tokens with top_p probability mass.",
+          "supports_reasoning": "Enable this if the model supports reasoning effort configuration. When enabled, you can specify the reasoning effort level.",
+          "reasoning_effort": "For Qwen models: 'default' or 'none'. For GPT-OSS models: 'low', 'medium', or 'high'. For other models, enter a custom value. The value is translated automatically when the fallback chain crosses model families.",
+          "history_budget": "Approximate token budget for the conversation history sent on every request. Groq counts input + output against the same per-minute limit, and the whole history is resent each turn, so without a budget a long conversation eventually exceeds the limit and then fails permanently. Leave room for max_tokens.",
+          "model_chain": "Models to try, in order, when the main one is rate limited. Groq's limits are per model, so each entry adds its own token-per-minute window.",
+          "model_cooldown": "Seconds to avoid reusing a model after it was used. Rotates before Groq rejects, saving the round trip of a 429. A model on cooldown is moved to the end of the list, never dropped. Set to 0 to disable.",
+          "cf_account_id": "Optional last-resort fallback on Cloudflare Workers AI, used only when every Groq model is out of quota. Leave empty to disable.",
+          "cf_api_token": "Token with the Workers AI permission. WARNING: this sends your conversations to a third party — leave it empty if you would rather not.",
+          "cf_model": "Cloudflare model name, for example @cf/qwen/qwen3.8-27b."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_config_entry": {
+      "message": "Invalid config entry provided. Got {config_entry}"
+    }
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "Esta clave de API ya está configurada"
+    },
+    "step": {
+      "user": {
+        "data": {
+          "api_key": "Clave de API"
+        },
+        "description": "Introduce tu clave de API de Groq Cloud para empezar."
+      }
+    },
+    "error": {
+      "cannot_connect": "No se pudo conectar",
+      "invalid_auth": "Clave de API no válida",
+      "unauthorized": "La clave de API no tiene los permisos necesarios",
+      "unknown": "Error inesperado"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "prompt": "Instrucciones",
+          "chat_model": "Modelo",
+          "max_tokens": "Tokens máximos de la respuesta",
+          "temperature": "Temperatura",
+          "top_p": "Top P",
+          "llm_hass_api": "Controlar Home Assistant",
+          "supports_reasoning": "El modelo admite esfuerzo de razonamiento (p. ej. qwen, gpt-oss)",
+          "reasoning_effort": "Esfuerzo de razonamiento",
+          "history_budget": "Presupuesto del historial (tokens)",
+          "model_chain": "Modelos de respaldo",
+          "model_cooldown": "Enfriamiento por modelo (segundos)",
+          "cf_account_id": "ID de cuenta de Cloudflare",
+          "cf_api_token": "Token de API de Cloudflare",
+          "cf_model": "Modelo de Cloudflare"
+        },
+        "data_description": {
+          "prompt": "Cómo debe responder el modelo. Admite plantillas.",
+          "llm_hass_api": "Permite que el modelo actúe sobre Home Assistant.",
+          "chat_model": "Modelo de Groq que se usa para conversar.",
+          "max_tokens": "Máximo de tokens que el modelo puede generar al responder. En modelos con razonamiento, los tokens de pensamiento salen de acá: si te quedás corto, la respuesta llega vacía.",
+          "temperature": "Valores altos hacen la salida más variada; valores bajos, más predecible.",
+          "top_p": "Muestreo por núcleo: considera los tokens que suman esa masa de probabilidad.",
+          "supports_reasoning": "Actívalo si el modelo admite configurar el esfuerzo de razonamiento.",
+          "reasoning_effort": "En modelos Qwen: «default» o «none». En gpt-oss: «low», «medium» o «high». El valor se traduce solo cuando la cadena de respaldo cruza de una familia a otra.",
+          "history_budget": "Tokens aproximados de historial que se reenvían en cada petición. El límite de Groq cuenta entrada + salida por minuto y el historial entero viaja en cada turno, así que sin presupuesto una conversación larga acaba superando el límite y a partir de ahí falla siempre. Tiene que dejar sitio para los tokens máximos de respuesta.",
+          "model_chain": "Modelos que se prueban, en orden, cuando el principal se queda sin cupo. Los límites de Groq son por modelo, así que cada entrada aporta su propia ventana de tokens por minuto.",
+          "model_cooldown": "Segundos que se evita reutilizar un modelo después de usarlo. Rota antes de que Groq rechace, ahorrando el viaje de red de un 429. Un modelo en enfriamiento pasa al final de la lista, nunca se descarta. Ponlo en 0 para desactivarlo.",
+          "cf_account_id": "Respaldo opcional de última instancia en Cloudflare Workers AI; solo se usa cuando ningún modelo de Groq tiene cupo. Déjalo vacío para desactivarlo.",
+          "cf_api_token": "Token con permiso de Workers AI. AVISO: esto manda tus conversaciones a un tercero. Si prefieres que no salgan, deja el campo vacío.",
+          "cf_model": "Nombre del modelo en Cloudflare, por ejemplo @cf/qwen/qwen3.8-27b."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_config_entry": {
+      "message": "La entrada de configuración no es válida. Se recibió {config_entry}"
+    }
+  }
+}

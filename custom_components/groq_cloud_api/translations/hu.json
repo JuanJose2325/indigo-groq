@@ -1,0 +1,52 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "Ez az API kulcs már konfigurálva van"
+    },
+    "step": {
+      "user": {
+        "data": {
+          "api_key": "API kulcs"
+        },
+        "description": "Add meg a Groq Cloud API kulcsot a kezdéshez."
+      }
+    },
+    "error": {
+      "cannot_connect": "Nem lehet csatlakozni a szolgáltatáshoz",
+      "invalid_auth": "Érvénytelen API kulcs",
+      "unauthorized": "Az API kulcsnak nincs megfelelő jogosultsága",
+      "unknown": "Váratlan hiba"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "prompt": "Utasítások",
+          "chat_model": "Modell",
+          "max_tokens": "Válaszban visszatérítendő maximális tokenek száma",
+          "temperature": "Hőmérséklet",
+          "top_p": "Top P",
+          "llm_hass_api": "Home Assistant irányítás",
+          "supports_reasoning": "A modell támogatja a gondolkodási erőfeszítést (pl. qwen3-32b, gpt-oss)",
+          "reasoning_effort": "Gondolkodási erőfeszítés"
+        },
+        "data_description": {
+          "prompt": "Add meg, hogy az LLM hogyan reagáljon. Ez egy sablon is lehet.",
+          "llm_hass_api": "Engedélyezd a modell számára a Home Assistant irányítását.",
+          "chat_model": "Válaszd ki a beszélgetésekhez használni kívánt Groq modellt.",
+          "max_tokens": "A modell által generálható tokenek maximális száma egy válaszban.",
+          "temperature": "Magasabb értékek véletlenszerűbb, alacsonyabbak determinisztikusabb kimenetet eredményeznek.",
+          "top_p": "Nucleus mintavételezés: a top_p valószínűségi tömegű tokenek figyelembevétele.",
+          "supports_reasoning": "Engedélyezd ezt, ha a modell támogatja a gondolkodási erőfeszítés konfigurációját. Ha engedélyezve van, megadhatod a gondolkodási erőfeszítés szintjét.",
+          "reasoning_effort": "Qwen modellek esetén: 'default' vagy 'none'. GPT-OSS modellek esetén: 'low', 'medium' vagy 'high'. Más modellek esetén adj meg egyéni értéket."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_config_entry": {
+      "message": "Érvénytelen beállítás megadva. Ezt kaptam: {config_entry}"
+    }
+  }
+}
