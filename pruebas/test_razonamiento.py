@@ -80,6 +80,36 @@ comprobar(
     aplicar(QWEN, SIN_RAZONAMIENTO) == {},
 )
 
+# 5. Campo de esfuerzo vacío = "no configurado", NO "valor inválido". Son casos
+#    opuestos y durante un tiempo se trataron igual: el vacío caía en la red de
+#    seguridad contra el 400, que devuelve el máximo de la familia, y en Qwen el
+#    máximo se llama "default". Vaciar el campo para quitarle pensamiento al
+#    modelo se lo subía al tope. Se vio en la instalación real, en la línea
+#    «Esfuerzo de razonamiento None no válido ...; uso el de por defecto».
+for vacio in (None, ""):
+    opciones = {"supports_reasoning": True, "reasoning_effort": vacio}
+    comprobar(
+        f"esfuerzo {vacio!r} no se convierte en el máximo de Qwen",
+        "reasoning_effort" not in aplicar(QWEN, opciones),
+    )
+    comprobar(
+        f"esfuerzo {vacio!r} conserva igual el formato oculto en Qwen",
+        aplicar(QWEN, opciones).get("reasoning_format") == "hidden",
+    )
+    comprobar(
+        f"esfuerzo {vacio!r} tampoco inventa un esfuerzo para gpt-oss",
+        "reasoning_effort" not in aplicar(OSS, opciones),
+    )
+
+# 6. Pero un valor de verdad desconocido —modelo nuevo, config vieja— sí tiene
+#    que seguir cayendo en la red de seguridad: mejor el máximo que un 400.
+comprobar(
+    "un valor desconocido sigue traduciéndose a algo válido",
+    aplicar(QWEN, {"supports_reasoning": True,
+                   "reasoning_effort": "altísimo"}).get("reasoning_effort")
+    in {"default", "none"},
+)
+
 # 5. Higiene entre candidatos: el mismo diccionario se reusa en cada salto de la
 #    cadena, así que lo del modelo anterior tiene que desaparecer. Este es el
 #    caso exacto del salto Qwen -> llama.

@@ -330,14 +330,24 @@ def _aplicar_razonamiento(kwargs: dict, model: str, options: Any,
     if not options.get(CONF_SUPPORTS_REASONING):
         return
     pedido = forzar if forzar is not None else options.get(CONF_REASONING_EFFORT)
-    esfuerzo = _esfuerzo_para(model, pedido)
+    # Campo vacío NO es un valor inválido: es "no configurado", y son casos
+    # opuestos. Antes ambos caían en la rama de valor desconocido de
+    # `_esfuerzo_para`, que devuelve el MÁXIMO de la familia como red de
+    # seguridad contra un 400 — y en Qwen el máximo se llama "default". El
+    # resultado era que vaciar el campo para quitarle pensamiento al modelo se
+    # lo subía al tope, justo lo contrario de lo que pide quien lo vacía.
+    # Sin esfuerzo elegido se manda igual `reasoning_format` (si no, el
+    # pensamiento vuelve dentro del texto y el TTS lo lee en voz alta) pero se
+    # deja que el modelo use su propio criterio.
+    esfuerzo = _esfuerzo_para(model, pedido) if pedido else None
     # Antes esto era "qwen/qwen3-32b" (modelo deprecado por Groq en jun 2026),
     # así que qwen/qwen3.8-27b NO entraba acá y se quedaba sin
     # reasoning_format="hidden": el texto del pensamiento volvía DENTRO de la
     # respuesta y se comía max_tokens antes de llegar a contestar.
     if model.startswith("qwen/"):
         kwargs["reasoning_format"] = "hidden"
-        kwargs["reasoning_effort"] = esfuerzo or "default"
+        if esfuerzo:
+            kwargs["reasoning_effort"] = esfuerzo
     elif model.startswith("openai/gpt-oss"):
         # `include_reasoning=False` NO alcanza: con eso los gpt-oss devolvían
         # la cadena de pensamiento entera DENTRO de `content`, en inglés y con
