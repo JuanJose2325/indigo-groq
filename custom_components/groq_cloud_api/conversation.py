@@ -293,8 +293,14 @@ def _aplicar_razonamiento(kwargs: dict, model: str, options: Any,
         kwargs["include_reasoning"] = False
         if esfuerzo:
             kwargs["reasoning_effort"] = esfuerzo
-    elif esfuerzo:
-        kwargs["reasoning_effort"] = esfuerzo
+    # Familia desconocida: no se manda NADA de razonamiento. Antes acá se
+    # colaba `reasoning_effort` a cualquier modelo, y los que no razonan
+    # —llama-3.3-70b-versatile, por ejemplo— contestan HTTP 400 al recibirlo.
+    # Eso importa justo ahora que la cadena se ensancha con modelos de otras
+    # familias: un 400 en un eslabón de respaldo se escucha como un error
+    # crudo en voz alta, que es peor que la respuesta algo peor de un modelo
+    # sin pensamiento. Si más adelante entra un razonador nuevo, se agrega su
+    # familia a `_EQUIVALENCIAS` y vuelve a recibir los parámetros.
 
 
 def _candidatos(principal: str, cadena: list[str], ultimo_uso: dict[str, float],

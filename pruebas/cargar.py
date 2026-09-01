@@ -59,6 +59,8 @@ def cargar(nombres: list[str]) -> SimpleNamespace:
         # const.py. Se copian a mano a propósito: si alguien cambia el valor
         # real, conviene que la prueba lo note.
         "CHARS_PER_TOKEN": 3.5,
+        "CONF_REASONING_EFFORT": "reasoning_effort",
+        "CONF_SUPPORTS_REASONING": "supports_reasoning",
         "LOGGER": logging.getLogger("pruebas"),
         "json_dumps": lambda x: json.dumps(x, separators=(",", ":")),
         "time": time,
