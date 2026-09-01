@@ -74,6 +74,11 @@ MAX_TOOL_ITERATIONS = 10
 # Segundos que se le conceden a Cloudflare antes de darlo por perdido.
 TIEMPO_MAXIMO_CF = 15
 
+# Piso al que puede bajar `max_tokens` cuando Groq rechaza por tamaño. Por
+# debajo de esto la respuesta sale cortada a media frase, que por voz se
+# entiende peor que un "no pude": ahí conviene dejar de encoger y fallar.
+TOPE_MINIMO_TOKENS = 400
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -258,6 +263,55 @@ async def _pedir(clientes: Any, kwargs: dict, es_cf: bool) -> Any:
     if es_cf:
         return await _llamar_cloudflare(clientes, kwargs)
     return await clientes.groq.chat.completions.create(**kwargs)
+
+
+def _detalle_error(err: Any) -> str:
+    """El mensaje que manda Groq, no solo el número de estado.
+
+    Sin esto en el log queda únicamente el código, y 413 y 429 se vuelven
+    indistinguibles de un vistazo siendo problemas OPUESTOS: uno se arregla
+    pidiendo menos, el otro esperando. El cuerpo del 413 además dice el límite
+    y cuánto se pidió, que es el dato con el que se calibra `max_tokens`.
+    """
+    # Todo con isinstance en vez de `.get` encadenado: esto corre en el camino
+    # de la respuesta al usuario, y un proveedor que devuelva `error` como
+    # texto suelto en lugar de objeto no puede tumbar la petición entera.
+    cuerpo = getattr(err, "body", None)
+    if isinstance(cuerpo, dict):
+        error = cuerpo.get("error")
+        if isinstance(error, dict) and error.get("message") is not None:
+            return str(error["message"])[:300]
+    return str(err)[:300]
+
+
+async def _pedir_encogiendo(clientes: Any, kwargs: dict, es_cf: bool,
+                            etiqueta: str) -> Any:
+    """Como `_pedir`, pero achica la petición si la rechazan por tamaño.
+
+    HTTP 413 NO es falta de cupo, aunque el código lo tratara igual que un 429
+    durante mucho tiempo: significa que la petición entera —la entrada más el
+    techo de generación— no entra de una sola vez. Rotar de modelo ahí no
+    arregla nada, porque al siguiente le llega exactamente lo mismo y lo
+    rechaza igual; en el log eso se veía como pares 413→413→Cloudflare
+    instantáneos. Lo único que ayuda es pedir menos.
+
+    Se baja `max_tokens` a la mitad y se reintenta el MISMO modelo. El cambio
+    se deja escrito en `kwargs` a propósito: si la petición no entraba acá,
+    tampoco va a entrar en el siguiente candidato.
+    """
+    while True:
+        try:
+            return await _pedir(clientes, kwargs, es_cf)
+        except groq.APIStatusError as err:
+            tope = kwargs.get("max_tokens") or 0
+            if err.status_code != 413 or tope <= TOPE_MINIMO_TOKENS:
+                raise
+            kwargs["max_tokens"] = max(TOPE_MINIMO_TOKENS, tope // 2)
+            LOGGER.warning(
+                "%s rechazó la petición por TAMAÑO (HTTP 413), no por cupo: "
+                "%s. Bajo max_tokens de %s a %s y reintento el mismo modelo.",
+                etiqueta, _detalle_error(err), tope, kwargs["max_tokens"],
+            )
 
 
 def _aplicar_razonamiento(kwargs: dict, model: str, options: Any,
@@ -516,7 +570,8 @@ class GroqConversationEntity(
                     else:
                         _aplicar_razonamiento(model_kwargs, nombre, options)
                     try:
-                        result = await _pedir(clientes, model_kwargs, es_cf)
+                        result = await _pedir_encogiendo(
+                            clientes, model_kwargs, es_cf, candidato)
                     except groq.APIStatusError as err:
                         limitado = (err.status_code in (413, 429)
                                     or "rate_limit" in str(err))
@@ -525,9 +580,13 @@ class GroqConversationEntity(
                         # hay que recordar para no volver a elegirlo ya mismo.
                         self._ultimo_uso[candidato] = time.monotonic()
                         if limitado and pos + 1 < len(candidatos):
+                            # Un 413 que llega hasta acá ya se encogió todo lo
+                            # que se podía, así que rotar es lo último que
+                            # queda aunque no sea probable que ayude.
                             LOGGER.warning(
-                                "%s sin cupo (HTTP %s), salto a %s sin esperar",
-                                candidato, err.status_code, candidatos[pos + 1],
+                                "%s no pudo (HTTP %s: %s), salto a %s sin "
+                                "esperar", candidato, err.status_code,
+                                _detalle_error(err), candidatos[pos + 1],
                             )
                             continue
                         raise
