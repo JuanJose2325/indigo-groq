@@ -35,7 +35,8 @@
           "model_cooldown": "Enfriamiento por modelo (segundos)",
           "cf_account_id": "ID de cuenta de Cloudflare",
           "cf_api_token": "Token de API de Cloudflare",
-          "cf_model": "Modelo de Cloudflare"
+          "cf_model": "Modelo de Cloudflare",
+          "reasoning_effort_chain": "Esfuerzo de razonamiento (modelos de respaldo)"
         },
         "data_description": {
           "prompt": "Cómo debe responder el modelo. Admite plantillas.",
@@ -51,7 +52,8 @@
           "model_cooldown": "Segundos que se evita reutilizar un modelo después de usarlo. Rota antes de que Groq rechace, ahorrando el viaje de red de un 429. Un modelo en enfriamiento pasa al final de la lista, nunca se descarta. Ponlo en 0 para desactivarlo.",
           "cf_account_id": "Respaldo opcional de última instancia en Cloudflare Workers AI; solo se usa cuando ningún modelo de Groq tiene cupo. Déjalo vacío para desactivarlo.",
           "cf_api_token": "Token con permiso de Workers AI. AVISO: esto manda tus conversaciones a un tercero. Si prefieres que no salgan, deja el campo vacío.",
-          "cf_model": "Nombre del modelo en Cloudflare, por ejemplo @cf/qwen/qwen3.8-27b."
+          "cf_model": "Nombre del modelo en Cloudflare, por ejemplo @cf/qwen/qwen3.8-27b.",
+          "reasoning_effort_chain": "Se aplica solo a la cadena de respaldo, aparte del principal. Un respaldo entra justo cuando el cupo escasea, y si gasta el presupuesto pensando vuelve vacío y no escuchás nada: por eso «none» es lo recomendado. El valor se traduce solo a la familia de cada modelo."
         }
       }
     }

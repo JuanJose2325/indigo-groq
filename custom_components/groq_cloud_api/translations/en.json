@@ -35,7 +35,8 @@
           "model_cooldown": "Model cooldown (seconds)",
           "cf_account_id": "Cloudflare account ID",
           "cf_api_token": "Cloudflare API token",
-          "cf_model": "Cloudflare model"
+          "cf_model": "Cloudflare model",
+          "reasoning_effort_chain": "Reasoning effort (fallback models)"
         },
         "data_description": {
           "prompt": "Instruct how the LLM should respond. This can be a template.",
@@ -51,7 +52,8 @@
           "model_cooldown": "Seconds to avoid reusing a model after it was used. Rotates before Groq rejects, saving the round trip of a 429. A model on cooldown is moved to the end of the list, never dropped. Set to 0 to disable.",
           "cf_account_id": "Optional last-resort fallback on Cloudflare Workers AI, used only when every Groq model is out of quota. Leave empty to disable.",
           "cf_api_token": "Token with the Workers AI permission. WARNING: this sends your conversations to a third party — leave it empty if you would rather not.",
-          "cf_model": "Cloudflare model name, for example @cf/qwen/qwen3.8-27b."
+          "cf_model": "Cloudflare model name, for example @cf/qwen/qwen3.8-27b.",
+          "reasoning_effort_chain": "Applies only to the fallback chain, separately from the primary model. A fallback kicks in exactly when quota is scarce, and if it spends its budget thinking it comes back empty and you hear nothing, so 'none' is recommended. The value is translated automatically to each model's family."
         }
       }
     }

@@ -52,6 +52,7 @@ from .const import (
     CONF_MODEL_COOLDOWN,
     CONF_PROMPT,
     CONF_REASONING_EFFORT,
+    CONF_REASONING_EFFORT_CHAIN,
     CONF_SUPPORTS_REASONING,
     CONF_TEMPERATURE,
     CONF_TOP_P,
@@ -63,6 +64,7 @@ from .const import (
     RECOMMENDED_HISTORY_BUDGET,
     RECOMMENDED_MAX_RETRIES,
     RECOMMENDED_MAX_TOKENS,
+    RECOMMENDED_REASONING_EFFORT_CHAIN,
     RECOMMENDED_MODEL_COOLDOWN,
     RECOMMENDED_TEMPERATURE,
     RECOMMENDED_TOP_P,
@@ -315,7 +317,8 @@ async def _pedir_encogiendo(clientes: Any, kwargs: dict, es_cf: bool,
 
 
 def _aplicar_razonamiento(kwargs: dict, model: str, options: Any,
-                          forzar: str | None = None) -> None:
+                          forzar: str | None = None,
+                          es_principal: bool = True) -> None:
     """Parámetros de razonamiento, que dependen del modelo concreto.
 
     Extraído a una función porque con la cadena de respaldo el modelo cambia
@@ -323,13 +326,24 @@ def _aplicar_razonamiento(kwargs: dict, model: str, options: Any,
 
     `forzar` pisa el esfuerzo configurado; se usa para repetir la pregunta sin
     pensamiento cuando el pensamiento se comió el presupuesto entero.
+
+    `es_principal` elige de qué campo sale el esfuerzo. El titular y los
+    suplentes necesitan políticas opuestas: el principal se eligió porque
+    contesta bien y puede permitirse pensar, mientras que un respaldo entra
+    justamente cuando el cupo escasea, y ahí gastar el presupuesto razonando
+    es la diferencia entre una respuesta peor y ninguna respuesta.
     """
     kwargs.pop("reasoning_format", None)
     kwargs.pop("reasoning_effort", None)
     kwargs.pop("include_reasoning", None)
     if not options.get(CONF_SUPPORTS_REASONING):
         return
-    pedido = forzar if forzar is not None else options.get(CONF_REASONING_EFFORT)
+    if es_principal:
+        configurado = options.get(CONF_REASONING_EFFORT)
+    else:
+        configurado = options.get(CONF_REASONING_EFFORT_CHAIN,
+                                  RECOMMENDED_REASONING_EFFORT_CHAIN)
+    pedido = forzar if forzar is not None else configurado
     # Campo vacío NO es un valor inválido: es "no configurado", y son casos
     # opuestos. Antes ambos caían en la rama de valor desconocido de
     # `_esfuerzo_para`, que devuelve el MÁXIMO de la familia como red de
@@ -543,7 +557,11 @@ class GroqConversationEntity(
         tools_fallback_attempted = False
         for _iteration in range(MAX_TOOL_ITERATIONS):
             try:
-                model = options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
+                # `model` va cambiando al recorrer la cadena; `principal`
+                # guarda cuál es el titular, que es lo que decide la política
+                # de razonamiento y no puede perderse en el camino.
+                principal = options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
+                model = principal
                 model_kwargs: dict[str, Any] = {
                     "messages": messages,
                     "tools": tools or NOT_GIVEN,
@@ -578,7 +596,12 @@ class GroqConversationEntity(
                                       "include_reasoning"):
                             model_kwargs.pop(clave, None)
                     else:
-                        _aplicar_razonamiento(model_kwargs, nombre, options)
+                        # El principal puede reaparecer más abajo en la
+                        # rotación cuando está en enfriamiento; lo que decide
+                        # la política es QUÉ modelo es, no en qué puesto entró.
+                        _aplicar_razonamiento(
+                            model_kwargs, nombre, options,
+                            es_principal=(nombre == principal))
                     try:
                         result = await _pedir_encogiendo(
                             clientes, model_kwargs, es_cf, candidato)
@@ -614,8 +637,9 @@ class GroqConversationEntity(
                             "volvió vacío; repito sin pensamiento",
                             candidato, model_kwargs["max_tokens"],
                         )
-                        _aplicar_razonamiento(model_kwargs, nombre, options,
-                                              forzar="none")
+                        _aplicar_razonamiento(
+                            model_kwargs, nombre, options, forzar="none",
+                            es_principal=(nombre == principal))
                         try:
                             result = await _pedir(clientes, model_kwargs, es_cf)
                         except groq.APIStatusError as err:

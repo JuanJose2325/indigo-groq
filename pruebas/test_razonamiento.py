@@ -30,9 +30,10 @@ SIN_RAZONAMIENTO = {"supports_reasoning": False, "reasoning_effort": "default"}
 CLAVES = ("reasoning_format", "reasoning_effort", "include_reasoning")
 
 
-def aplicar(model, options, forzar=None, previo=None):
+def aplicar(model, options, forzar=None, previo=None, principal=True):
     kwargs = dict(previo or {})
-    M._aplicar_razonamiento(kwargs, model, options, forzar=forzar)
+    M._aplicar_razonamiento(kwargs, model, options, forzar=forzar,
+                            es_principal=principal)
     return {k: v for k, v in kwargs.items() if k in CLAVES}
 
 
@@ -131,6 +132,50 @@ M._aplicar_razonamiento(kwargs, LLAMA, CON_RAZONAMIENTO)
 comprobar(
     "no pisa el resto de la petición",
     kwargs == {"model": LLAMA, "max_tokens": 1200},
+)
+
+# 7. Política separada para principal y respaldos. El titular se eligió porque
+#    contesta bien y puede permitirse pensar; un suplente entra justo cuando el
+#    cupo escasea, y gastarlo razonando es la diferencia entre una respuesta
+#    peor y NINGUNA respuesta. Medido: el principal contestaba pensando en
+#    120-180 tokens y el respaldo quemaba los 1200 sin llegar a hablar.
+DOS_POLITICAS = {"supports_reasoning": True,
+                 "reasoning_effort": "default",
+                 "reasoning_effort_chain": "none"}
+
+comprobar(
+    "el principal usa su propio campo",
+    aplicar(QWEN, DOS_POLITICAS).get("reasoning_effort") == "default",
+)
+comprobar(
+    "un respaldo usa el campo de la cadena",
+    aplicar(QWEN, DOS_POLITICAS, principal=False).get("reasoning_effort") == "none",
+)
+comprobar(
+    "el respaldo también se traduce a la familia que toque",
+    aplicar(OSS, DOS_POLITICAS, principal=False).get("reasoning_effort") == "low",
+)
+
+# 8. Sin el campo nuevo configurado —una instalación que viene de una versión
+#    anterior— el respaldo NO hereda el esfuerzo del principal: hereda el
+#    recomendado, que es no pensar. Heredar sería reproducir el fallo original.
+SOLO_VIEJO = {"supports_reasoning": True, "reasoning_effort": "default"}
+comprobar(
+    "sin el campo nuevo el respaldo no hereda el esfuerzo del principal",
+    aplicar(QWEN, SOLO_VIEJO, principal=False).get("reasoning_effort") == "none",
+)
+comprobar(
+    "pero el principal sigue respetando el suyo",
+    aplicar(QWEN, SOLO_VIEJO).get("reasoning_effort") == "default",
+)
+
+# 9. El reintento forzado pisa las DOS políticas: si volvió vacío, no importa
+#    de qué campo salía el esfuerzo.
+comprobar(
+    "forzar pisa también la política del respaldo",
+    aplicar(QWEN, {"supports_reasoning": True,
+                   "reasoning_effort_chain": "default"},
+            forzar="none", principal=False).get("reasoning_effort") == "none",
 )
 
 resumen("parámetros de razonamiento por familia de modelo")

@@ -29,7 +29,8 @@
           "top_p": "Top P",
           "llm_hass_api": "Home Assistant irányítás",
           "supports_reasoning": "A modell támogatja a gondolkodási erőfeszítést (pl. qwen3-32b, gpt-oss)",
-          "reasoning_effort": "Gondolkodási erőfeszítés"
+          "reasoning_effort": "Gondolkodási erőfeszítés",
+          "reasoning_effort_chain": "Gondolkodási erőfeszítés (tartalék modellek)"
         },
         "data_description": {
           "prompt": "Add meg, hogy az LLM hogyan reagáljon. Ez egy sablon is lehet.",
@@ -39,7 +40,8 @@
           "temperature": "Magasabb értékek véletlenszerűbb, alacsonyabbak determinisztikusabb kimenetet eredményeznek.",
           "top_p": "Nucleus mintavételezés: a top_p valószínűségi tömegű tokenek figyelembevétele.",
           "supports_reasoning": "Engedélyezd ezt, ha a modell támogatja a gondolkodási erőfeszítés konfigurációját. Ha engedélyezve van, megadhatod a gondolkodási erőfeszítés szintjét.",
-          "reasoning_effort": "Qwen modellek esetén: 'default' vagy 'none'. GPT-OSS modellek esetén: 'low', 'medium' vagy 'high'. Más modellek esetén adj meg egyéni értéket."
+          "reasoning_effort": "Qwen modellek esetén: 'default' vagy 'none'. GPT-OSS modellek esetén: 'low', 'medium' vagy 'high'. Más modellek esetén adj meg egyéni értéket.",
+          "reasoning_effort_chain": "Csak a tartaléklánera vonatkozik, a fő modelltől külön. Ajánlott érték: 'none'."
         }
       }
     }

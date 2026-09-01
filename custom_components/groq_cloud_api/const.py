@@ -16,6 +16,18 @@ CONF_CHAT_MODEL = "chat_model"
 RECOMMENDED_CHAT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 CONF_SUPPORTS_REASONING = "supports_reasoning"
 CONF_REASONING_EFFORT = "reasoning_effort"
+# Esfuerzo para los modelos de RESPALDO, separado del principal porque el
+# titular y los suplentes necesitan políticas opuestas. Medido en la
+# instalación real: el principal contesta pensando en 120-180 tokens, mientras
+# que el de respaldo quema los 1200 de max_tokens razonando y vuelve vacío. Un
+# suplente existe para contestar cuando el titular no puede; gastar su
+# presupuesto pensando lo vuelve inútil, así que el valor por defecto es "none".
+CONF_REASONING_EFFORT_CHAIN = "reasoning_effort_chain"
+RECOMMENDED_REASONING_EFFORT_CHAIN = "none"
+# Vocabulario que `_esfuerzo_para` sabe traducir a CUALQUIER familia. La cadena
+# puede mezclar familias, así que el desplegable del respaldo no puede ofrecer
+# el vocabulario de una sola.
+REASONING_OPTIONS_COMUNES = ["none", "low", "medium", "high", "default"]
 
 # Known models with predefined reasoning effort options
 QWEN_REASONING_OPTIONS = ["default", "none"]

@@ -45,6 +45,7 @@ from .const import (
     CONF_MODEL_CHAIN,
     CONF_MODEL_COOLDOWN,
     CONF_REASONING_EFFORT,
+    CONF_REASONING_EFFORT_CHAIN,
     CONF_SUPPORTS_REASONING,
     CONF_TEMPERATURE,
     CONF_TOP_P,
@@ -59,6 +60,8 @@ from .const import (
     RECOMMENDED_CF_MODEL,
     RECOMMENDED_HISTORY_BUDGET,
     RECOMMENDED_MAX_TOKENS,
+    RECOMMENDED_REASONING_EFFORT_CHAIN,
+    REASONING_OPTIONS_COMUNES,
     RECOMMENDED_MODEL_COOLDOWN,
     RECOMMENDED_TEMPERATURE,
     RECOMMENDED_TOP_P,
@@ -156,6 +159,7 @@ class GroqOptionsFlow(OptionsFlow):
             # Remove reasoning_effort if supports_reasoning is not checked
             if not user_input.get(CONF_SUPPORTS_REASONING):
                 user_input.pop(CONF_REASONING_EFFORT, None)
+                user_input.pop(CONF_REASONING_EFFORT_CHAIN, None)
                 user_input.pop(CONF_SUPPORTS_REASONING, None)
             return self.async_create_entry(title="", data=user_input)
 
@@ -245,6 +249,22 @@ class GroqOptionsFlow(OptionsFlow):
         else:
             reasoning_selector = TextSelector()
             reasoning_default = options.get(CONF_REASONING_EFFORT, "")
+
+        # Esfuerzo para los modelos de RESPALDO. Va aparte del principal porque
+        # necesitan políticas opuestas, y con su propio vocabulario: la cadena
+        # puede mezclar familias, así que ofrecer el desplegable de la familia
+        # del principal daría valores que el respaldo no acepta. Los cinco
+        # valores comunes los traduce `_esfuerzo_para` a cualquier familia.
+        esfuerzo_cadena = options.get(CONF_REASONING_EFFORT_CHAIN,
+                                      RECOMMENDED_REASONING_EFFORT_CHAIN)
+        if esfuerzo_cadena not in REASONING_OPTIONS_COMUNES:
+            esfuerzo_cadena = RECOMMENDED_REASONING_EFFORT_CHAIN
+        cadena_esfuerzo_selector = SelectSelector(
+            SelectSelectorConfig(
+                options=REASONING_OPTIONS_COMUNES,
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        )
 
         # Cadena de respaldo: mismos modelos, seleccion multiple y ordenada.
         # Los limites de Groq son por modelo, asi que cada uno suma su propia
@@ -344,6 +364,11 @@ class GroqOptionsFlow(OptionsFlow):
                 description={"suggested_value": options.get(CONF_REASONING_EFFORT)},
                 default=reasoning_default,
             )] = reasoning_selector
+            schema[vol.Optional(
+                CONF_REASONING_EFFORT_CHAIN,
+                description={"suggested_value": esfuerzo_cadena},
+                default=esfuerzo_cadena,
+            )] = cadena_esfuerzo_selector
 
         return schema
 

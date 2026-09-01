@@ -60,6 +60,8 @@ def cargar(nombres: list[str]) -> SimpleNamespace:
         # real, conviene que la prueba lo note.
         "CHARS_PER_TOKEN": 3.5,
         "CONF_REASONING_EFFORT": "reasoning_effort",
+        "CONF_REASONING_EFFORT_CHAIN": "reasoning_effort_chain",
+        "RECOMMENDED_REASONING_EFFORT_CHAIN": "none",
         "CONF_SUPPORTS_REASONING": "supports_reasoning",
         "LOGGER": logging.getLogger("pruebas"),
         "json_dumps": lambda x: json.dumps(x, separators=(",", ":")),
