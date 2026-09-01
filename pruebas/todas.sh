@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Corre las tres tandas de pruebas. Sin dependencias: solo python3.
+# Corre todas las tandas de pruebas. Sin dependencias: solo python3.
 set -u
 cd "$(dirname "$0")"
 fallos=0

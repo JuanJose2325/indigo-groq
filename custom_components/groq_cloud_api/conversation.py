@@ -233,18 +233,49 @@ async def _llamar_cloudflare(clientes: Any, kwargs: dict) -> Any:
     return ChatCompletion.model_validate(r.json())
 
 
-def _aplicar_razonamiento(kwargs: dict, model: str, options: Any) -> None:
+def _vacia_por_truncado(result: Any) -> bool:
+    """¿El modelo gastó todo max_tokens razonando y no llegó a contestar?
+
+    `finish_reason == "length"` con el contenido vacío es la firma exacta, y es
+    el peor fallo posible porque no se parece a un fallo: no hay excepción, el
+    pipeline da la vuelta entera como si todo hubiera salido bien, no emite
+    `synthesize` y el usuario se queda escuchando silencio. Hay que tratarlo
+    como un modelo que falló, no como una respuesta.
+    """
+    eleccion = (getattr(result, "choices", None) or [None])[0]
+    if eleccion is None or getattr(eleccion, "finish_reason", None) != "length":
+        return False
+    mensaje = getattr(eleccion, "message", None)
+    # Truncar DESPUÉS de pedir una herramienta no es este caso: la petición
+    # está completa y sirve, aunque no venga texto acompañándola.
+    if getattr(mensaje, "tool_calls", None):
+        return False
+    return not (getattr(mensaje, "content", None) or "").strip()
+
+
+async def _pedir(clientes: Any, kwargs: dict, es_cf: bool) -> Any:
+    """Una llamada al proveedor que toque, con la misma forma de respuesta."""
+    if es_cf:
+        return await _llamar_cloudflare(clientes, kwargs)
+    return await clientes.groq.chat.completions.create(**kwargs)
+
+
+def _aplicar_razonamiento(kwargs: dict, model: str, options: Any,
+                          forzar: str | None = None) -> None:
     """Parámetros de razonamiento, que dependen del modelo concreto.
 
     Extraído a una función porque con la cadena de respaldo el modelo cambia
     entre reintentos y hay que recalcularlos para cada uno.
+
+    `forzar` pisa el esfuerzo configurado; se usa para repetir la pregunta sin
+    pensamiento cuando el pensamiento se comió el presupuesto entero.
     """
     kwargs.pop("reasoning_format", None)
     kwargs.pop("reasoning_effort", None)
     kwargs.pop("include_reasoning", None)
     if not options.get(CONF_SUPPORTS_REASONING):
         return
-    pedido = options.get(CONF_REASONING_EFFORT)
+    pedido = forzar if forzar is not None else options.get(CONF_REASONING_EFFORT)
     esfuerzo = _esfuerzo_para(model, pedido)
     # Antes esto era "qwen/qwen3-32b" (modelo deprecado por Groq en jun 2026),
     # así que qwen/qwen3.8-27b NO entraba acá y se quedaba sin
@@ -479,13 +510,7 @@ class GroqConversationEntity(
                     else:
                         _aplicar_razonamiento(model_kwargs, nombre, options)
                     try:
-                        if es_cf:
-                            result = await _llamar_cloudflare(
-                                clientes, model_kwargs)
-                        else:
-                            result = await clientes.groq.chat.completions.create(
-                                **model_kwargs
-                            )
+                        result = await _pedir(clientes, model_kwargs, es_cf)
                     except groq.APIStatusError as err:
                         limitado = (err.status_code in (413, 429)
                                     or "rate_limit" in str(err))
@@ -500,10 +525,42 @@ class GroqConversationEntity(
                             )
                             continue
                         raise
-                    else:
+                    self._ultimo_uso[candidato] = time.monotonic()
+
+                    # Se reintenta UNA vez sin pensamiento. Una respuesta más
+                    # seca es infinitamente mejor que el silencio, y volver a
+                    # preguntarle al mismo modelo sale más barato que saltar:
+                    # el siguiente de la cadena suele ser peor, y el salto
+                    # gasta la ventana de otro modelo que quizá haga falta
+                    # después. No aplica a Cloudflare, que va sin razonamiento.
+                    if not es_cf and _vacia_por_truncado(result):
+                        LOGGER.warning(
+                            "%s gastó los %s tokens de max_tokens pensando y "
+                            "volvió vacío; repito sin pensamiento",
+                            candidato, model_kwargs["max_tokens"],
+                        )
+                        _aplicar_razonamiento(model_kwargs, nombre, options,
+                                              forzar="none")
+                        try:
+                            result = await _pedir(clientes, model_kwargs, es_cf)
+                        except groq.APIStatusError as err:
+                            # Sin cupo para el reintento: nos quedamos con el
+                            # vacío y que decida el salto de abajo.
+                            LOGGER.warning(
+                                "el reintento sin pensamiento de %s tampoco "
+                                "entró (HTTP %s)", candidato, err.status_code,
+                            )
                         self._ultimo_uso[candidato] = time.monotonic()
-                        model = candidato
-                        break
+
+                    if _vacia_por_truncado(result) and pos + 1 < len(candidatos):
+                        LOGGER.warning(
+                            "%s sigue devolviendo vacío, salto a %s",
+                            candidato, candidatos[pos + 1],
+                        )
+                        continue
+
+                    model = candidato
+                    break
                 # Sin esto hay que adivinar cuánto pesa cada petición. El
                 # límite de Groq es por minuto contando entrada + salida, así
                 # que estos tres números son los que dicen si el recorte del
@@ -515,19 +572,20 @@ class GroqConversationEntity(
                     # caché no está pegando y no hay ahorro que perseguir.
                     detalle = getattr(uso, "prompt_tokens_details", None)
                     cacheados = getattr(detalle, "cached_tokens", None)
-                    # finish_reason == "length" con contenido vacío es LA firma
-                    # de que el razonamiento se comió todo max_tokens: el
-                    # usuario no escucha nada y en el log no se ve ningún error.
                     eleccion = (result.choices or [None])[0]
                     motivo = getattr(eleccion, "finish_reason", None)
                     texto = getattr(getattr(eleccion, "message", None),
                                     "content", None) or ""
-                    if motivo == "length" and not texto.strip():
+                    # Llegar acá vacío significa que ya se probó todo: cada
+                    # modelo de la cadena, y cada uno también sin pensamiento.
+                    # El usuario va a escuchar silencio y esto es lo único que
+                    # va a quedar escrito, así que va como ERROR.
+                    if _vacia_por_truncado(result):
                         LOGGER.error(
-                            "%s devolvió RESPUESTA VACÍA por truncado: gastó "
-                            "los %s tokens de max_tokens razonando y no llegó "
-                            "a contestar. Bajá el esfuerzo de razonamiento o "
-                            "subí max_tokens.",
+                            "RESPUESTA VACÍA tras agotar la cadena entera: %s "
+                            "gastó los %s tokens de max_tokens razonando y ni "
+                            "sin pensamiento llegó a contestar. Subí "
+                            "max_tokens o poné reasoning_effort en 'none'.",
                             model, uso.completion_tokens,
                         )
                     # WARNING a propósito: la config de Juan tiene
