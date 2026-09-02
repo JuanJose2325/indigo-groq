@@ -1,34 +1,25 @@
-"""Conversation support for Groq Cloud."""
+"""Entidad de conversación de Groq y orquestación de un turno.
+
+Frontera de este módulo: es el ÚNICO archivo que ve `hass`, `self` y
+`chat_log`. Acá no se calcula nada que se pueda calcular en un módulo puro;
+solo se pegan piezas y se traduce entre lo que pide Home Assistant y lo que
+deciden los módulos de decisión. Por eso ninguna función de este archivo se
+carga por AST desde `pruebas/cargar.py`: todo lo que vale la pena probar vive
+en `cadena.py`, `historial.py`, `respuestas.py`, `razonamiento.py` y
+`enrutadores.py`.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-import json
-import time
 from typing import Any, Literal
 
 import groq
 from groq._types import NOT_GIVEN
-from groq.types.chat import (
-    ChatCompletion,
-    ChatCompletionAssistantMessageParam,
-    ChatCompletionMessageToolCallParam,
-    ChatCompletionSystemMessageParam,
-    ChatCompletionToolMessageParam,
-    ChatCompletionToolParam,
-    ChatCompletionUserMessageParam,
-)
-from groq.types.chat.chat_completion_message_tool_call_param import Function
-from groq.types.shared_params import FunctionDefinition
-from voluptuous_openapi import convert
 
 from homeassistant.components import conversation
 from homeassistant.components.conversation import (
     AssistantContent,
     ConverseError,
-    SystemContent,
-    ToolResultContent,
-    UserContent,
     async_get_result_from_chat_log,
     trace,
 )
@@ -39,47 +30,46 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.json import json_dumps
 
 from . import GroqConfigEntry
+from .cadena import _candidatos
 from .const import (
-    CHARS_PER_TOKEN,
-    CONF_CF_ACCOUNT,
-    CONF_CF_MODEL,
-    CONF_CF_TOKEN,
     CONF_CHAT_MODEL,
     CONF_HISTORY_BUDGET,
-    CONF_MAX_RETRIES,
     CONF_MAX_TOKENS,
     CONF_MODEL_CHAIN,
     CONF_MODEL_COOLDOWN,
     CONF_PROMPT,
     CONF_REASONING_EFFORT,
-    CONF_REASONING_EFFORT_CHAIN,
-    CONF_SUPPORTS_REASONING,
     CONF_TEMPERATURE,
     CONF_TOP_P,
     DOMAIN,
     LOGGER,
-    PREFIJO_CF,
-    RECOMMENDED_CF_MODEL,
+    MAX_TOOL_ITERATIONS,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_HISTORY_BUDGET,
-    RECOMMENDED_MAX_RETRIES,
     RECOMMENDED_MAX_TOKENS,
-    RECOMMENDED_REASONING_EFFORT_CHAIN,
     RECOMMENDED_MODEL_COOLDOWN,
     RECOMMENDED_TEMPERATURE,
     RECOMMENDED_TOP_P,
+    TOPE_MINIMO_TOKENS,
+    TURNOS_CONTEXTO_CASA,
 )
-
-# Max number of back and forth with the LLM to generate a response
-MAX_TOOL_ITERATIONS = 10
-
-# Segundos que se le conceden a Cloudflare antes de darlo por perdido.
-TIEMPO_MAXIMO_CF = 15
-
-# Piso al que puede bajar `max_tokens` cuando Groq rechaza por tamaño. Por
-# debajo de esto la respuesta sale cortada a media frase, que por voz se
-# entiende peor que un "no pude": ahí conviene dejar de encoger y fallar.
-TOPE_MINIMO_TOKENS = 400
+from .enrutadores import _ajustes_enrutadores, _decidir_enrutadores
+from .historial import _recortar_historial, _sin_herramientas, _ultimos_turnos
+from .mensajes import (
+    _assistant_content_to_message,
+    _chat_log_to_messages,
+    _format_tool,
+    _limitar_herramientas,
+)
+from .peticiones import _responder_con_cadena
+from .respuestas import (
+    _argumentos_de_herramienta,
+    _detalle_error,
+    _peticiones_de_herramienta,
+    _resumen_uso,
+    _texto_de,
+    _vacia_por_truncado,
+)
 
 
 async def async_setup_entry(
@@ -87,397 +77,26 @@ async def async_setup_entry(
     config_entry: GroqConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up conversation entities."""
-    agent = GroqConversationEntity(config_entry)
-    async_add_entities([agent])
-
-
-def _format_tool(
-    tool: llm.Tool, custom_serializer: Callable[[Any], Any] | None
-) -> ChatCompletionToolParam:
-    """Format tool specification."""
-    tool_spec = FunctionDefinition(
-        name=tool.name,
-        parameters=convert(tool.parameters, custom_serializer=custom_serializer),
-    )
-    if tool.description:
-        tool_spec["description"] = tool.description
-    return ChatCompletionToolParam(type="function", function=tool_spec)
-
-
-def _assistant_content_to_message(
-    content: AssistantContent,
-) -> ChatCompletionAssistantMessageParam:
-    """Convert AssistantContent to a Groq assistant message."""
-    tool_calls: list[ChatCompletionMessageToolCallParam] = []
-
-    if content.tool_calls:
-        tool_calls = [
-            ChatCompletionMessageToolCallParam(
-                id=tool_call.id,
-                function=Function(
-                    arguments=json_dumps(tool_call.tool_args),
-                    name=tool_call.tool_name,
-                ),
-                type="function",
-            )
-            for tool_call in content.tool_calls
-        ]
-
-    assistant_message = ChatCompletionAssistantMessageParam(
-        role="assistant",
-        content=content.content,
-    )
-    if tool_calls:
-        assistant_message["tool_calls"] = tool_calls
-    return assistant_message
-
-
-def _chat_log_to_messages(
-    chat_log: conversation.ChatLog,
-) -> list[
-    ChatCompletionSystemMessageParam
-    | ChatCompletionUserMessageParam
-    | ChatCompletionAssistantMessageParam
-    | ChatCompletionToolMessageParam
-]:
-    """Convert chat log content to Groq chat completion messages."""
-    messages: list[
-        ChatCompletionSystemMessageParam
-        | ChatCompletionUserMessageParam
-        | ChatCompletionAssistantMessageParam
-        | ChatCompletionToolMessageParam
-    ] = []
-
-    for content in chat_log.content:
-        if isinstance(content, SystemContent):
-            messages.append(
-                ChatCompletionSystemMessageParam(
-                    role="system", content=content.content
-                )
-            )
-        elif isinstance(content, UserContent):
-            messages.append(
-                ChatCompletionUserMessageParam(role="user", content=content.content)
-            )
-        elif isinstance(content, AssistantContent):
-            messages.append(_assistant_content_to_message(content))
-        elif isinstance(content, ToolResultContent):
-            messages.append(
-                ChatCompletionToolMessageParam(
-                    role="tool",
-                    tool_call_id=content.tool_call_id,
-                    content=json_dumps(content.tool_result),
-                )
-            )
-
-    return messages
-
-
-# Cada familia acepta un vocabulario distinto de esfuerzo de razonamiento, y
-# la cadena de respaldo cruza de una a otra. Sin traducir, saltar de un Qwen
-# (que usa "default"/"none") a un gpt-oss (que exige "low"/"medium"/"high")
-# devuelve HTTP 400 y el usuario escucha el error crudo en voz alta.
-_EQUIVALENCIAS = {
-    "qwen": {"low": "default", "medium": "default", "high": "default",
-             "default": "default", "none": "none"},
-    # OJO: "default" en Qwen equivale a esfuerzo máximo, pero traducirlo a
-    # "high" en gpt-oss es contraproducente acá. En los modelos de razonamiento
-    # los tokens de pensamiento SALEN DE max_tokens, así que con un presupuesto
-    # chico (500) el razonamiento alto se lo come entero y la respuesta llega
-    # VACÍA: el usuario no escucha nada. "medium" deja lugar para contestar.
-    "gpt-oss": {"default": "medium", "none": "low",
-                "low": "low", "medium": "medium", "high": "high"},
-}
-
-
-def _esfuerzo_para(model: str, pedido: str | None) -> str | None:
-    """Traduce el esfuerzo configurado al vocabulario del modelo destino."""
-    familia = ("qwen" if model.startswith("qwen/")
-               else "gpt-oss" if model.startswith("openai/gpt-oss") else None)
-    if familia is None:
-        return pedido
-    tabla = _EQUIVALENCIAS[familia]
-    if pedido in tabla:
-        return tabla[pedido]
-    # Valor desconocido (modelo nuevo, config vieja): mejor el máximo de la
-    # familia que un 400 que el usuario escucha como respuesta.
-    LOGGER.warning(
-        "Esfuerzo de razonamiento %r no válido para %s; uso el de por defecto",
-        pedido, model,
-    )
-    return "default" if familia == "qwen" else "high"
-
-
-async def _llamar_cloudflare(clientes: Any, kwargs: dict) -> Any:
-    """Pide a Cloudflare por HTTP y devuelve el mismo tipo que el SDK de Groq.
-
-    No se puede reusar el SDK de Groq con otro `base_url`: ese SDK le agrega
-    `openai/v1/` a la ruta (porque la API de Groq vive en
-    `api.groq.com/openai/v1/...`), así que apuntándolo a Cloudflare terminaba
-    pidiendo `.../ai/v1/openai/v1/chat/completions` y Cloudflare respondía
-    `No route for that URI`. Por eso acá se arma la petición a mano y se
-    valida la respuesta contra el modelo de datos del SDK, que es compatible.
-    """
-    url = (f"https://api.cloudflare.com/client/v4/accounts/"
-           f"{clientes.cf_cuenta}/ai/v1/chat/completions")
-    cuerpo = {k: v for k, v in kwargs.items()
-              # `user` es de Groq; Cloudflare no lo espera y no aporta nada.
-              if k != "user" and v is not NOT_GIVEN}
-    # 120 s era demasiado: por voz no hay spinner, así que un silencio largo es
-    # indistinguible de un cuelgue y el usuario repite el comando, encadenando
-    # dos peticiones. Más vale decir "no pude" a los 15 s que callarse 40.
-    r = await clientes.http.post(
-        url, json=cuerpo, timeout=TIEMPO_MAXIMO_CF,
-        headers={"Authorization": f"Bearer {clientes.cf_ficha}",
-                 "Content-Type": "application/json"})
-    if r.status_code >= 400:
-        raise ConverseError(
-            f"Cloudflare respondió {r.status_code}: {r.text[:300]}",
-            conversation_id=None,
-            response=intent.IntentResponse(language="es"),
-        )
-    return ChatCompletion.model_validate(r.json())
-
-
-def _vacia_por_truncado(result: Any) -> bool:
-    """¿El modelo gastó todo max_tokens razonando y no llegó a contestar?
-
-    `finish_reason == "length"` con el contenido vacío es la firma exacta, y es
-    el peor fallo posible porque no se parece a un fallo: no hay excepción, el
-    pipeline da la vuelta entera como si todo hubiera salido bien, no emite
-    `synthesize` y el usuario se queda escuchando silencio. Hay que tratarlo
-    como un modelo que falló, no como una respuesta.
-    """
-    eleccion = (getattr(result, "choices", None) or [None])[0]
-    if eleccion is None or getattr(eleccion, "finish_reason", None) != "length":
-        return False
-    mensaje = getattr(eleccion, "message", None)
-    # Truncar DESPUÉS de pedir una herramienta no es este caso: la petición
-    # está completa y sirve, aunque no venga texto acompañándola.
-    if getattr(mensaje, "tool_calls", None):
-        return False
-    return not (getattr(mensaje, "content", None) or "").strip()
-
-
-async def _pedir(clientes: Any, kwargs: dict, es_cf: bool) -> Any:
-    """Una llamada al proveedor que toque, con la misma forma de respuesta."""
-    if es_cf:
-        return await _llamar_cloudflare(clientes, kwargs)
-    return await clientes.groq.chat.completions.create(**kwargs)
-
-
-def _detalle_error(err: Any) -> str:
-    """El mensaje que manda Groq, no solo el número de estado.
-
-    Sin esto en el log queda únicamente el código, y 413 y 429 se vuelven
-    indistinguibles de un vistazo siendo problemas OPUESTOS: uno se arregla
-    pidiendo menos, el otro esperando. El cuerpo del 413 además dice el límite
-    y cuánto se pidió, que es el dato con el que se calibra `max_tokens`.
-    """
-    # Todo con isinstance en vez de `.get` encadenado: esto corre en el camino
-    # de la respuesta al usuario, y un proveedor que devuelva `error` como
-    # texto suelto en lugar de objeto no puede tumbar la petición entera.
-    cuerpo = getattr(err, "body", None)
-    if isinstance(cuerpo, dict):
-        error = cuerpo.get("error")
-        if isinstance(error, dict) and error.get("message") is not None:
-            return str(error["message"])[:300]
-    return str(err)[:300]
-
-
-async def _pedir_encogiendo(clientes: Any, kwargs: dict, es_cf: bool,
-                            etiqueta: str) -> Any:
-    """Como `_pedir`, pero achica la petición si la rechazan por tamaño.
-
-    HTTP 413 NO es falta de cupo, aunque el código lo tratara igual que un 429
-    durante mucho tiempo: significa que la petición entera —la entrada más el
-    techo de generación— no entra de una sola vez. Rotar de modelo ahí no
-    arregla nada, porque al siguiente le llega exactamente lo mismo y lo
-    rechaza igual; en el log eso se veía como pares 413→413→Cloudflare
-    instantáneos. Lo único que ayuda es pedir menos.
-
-    Se baja `max_tokens` a la mitad y se reintenta el MISMO modelo. El cambio
-    se deja escrito en `kwargs` a propósito: si la petición no entraba acá,
-    tampoco va a entrar en el siguiente candidato.
-    """
-    while True:
-        try:
-            return await _pedir(clientes, kwargs, es_cf)
-        except groq.APIStatusError as err:
-            tope = kwargs.get("max_tokens") or 0
-            if err.status_code != 413 or tope <= TOPE_MINIMO_TOKENS:
-                raise
-            kwargs["max_tokens"] = max(TOPE_MINIMO_TOKENS, tope // 2)
-            LOGGER.warning(
-                "%s rechazó la petición por TAMAÑO (HTTP 413), no por cupo: "
-                "%s. Bajo max_tokens de %s a %s y reintento el mismo modelo.",
-                etiqueta, _detalle_error(err), tope, kwargs["max_tokens"],
-            )
-
-
-def _aplicar_razonamiento(kwargs: dict, model: str, options: Any,
-                          forzar: str | None = None,
-                          es_principal: bool = True) -> None:
-    """Parámetros de razonamiento, que dependen del modelo concreto.
-
-    Extraído a una función porque con la cadena de respaldo el modelo cambia
-    entre reintentos y hay que recalcularlos para cada uno.
-
-    `forzar` pisa el esfuerzo configurado; se usa para repetir la pregunta sin
-    pensamiento cuando el pensamiento se comió el presupuesto entero.
-
-    `es_principal` elige de qué campo sale el esfuerzo. El titular y los
-    suplentes necesitan políticas opuestas: el principal se eligió porque
-    contesta bien y puede permitirse pensar, mientras que un respaldo entra
-    justamente cuando el cupo escasea, y ahí gastar el presupuesto razonando
-    es la diferencia entre una respuesta peor y ninguna respuesta.
-    """
-    kwargs.pop("reasoning_format", None)
-    kwargs.pop("reasoning_effort", None)
-    kwargs.pop("include_reasoning", None)
-    if not options.get(CONF_SUPPORTS_REASONING):
-        return
-    if es_principal:
-        configurado = options.get(CONF_REASONING_EFFORT)
-    else:
-        configurado = options.get(CONF_REASONING_EFFORT_CHAIN,
-                                  RECOMMENDED_REASONING_EFFORT_CHAIN)
-    pedido = forzar if forzar is not None else configurado
-    # Campo vacío NO es un valor inválido: es "no configurado", y son casos
-    # opuestos. Antes ambos caían en la rama de valor desconocido de
-    # `_esfuerzo_para`, que devuelve el MÁXIMO de la familia como red de
-    # seguridad contra un 400 — y en Qwen el máximo se llama "default". El
-    # resultado era que vaciar el campo para quitarle pensamiento al modelo se
-    # lo subía al tope, justo lo contrario de lo que pide quien lo vacía.
-    # Sin esfuerzo elegido se manda igual `reasoning_format` (si no, el
-    # pensamiento vuelve dentro del texto y el TTS lo lee en voz alta) pero se
-    # deja que el modelo use su propio criterio.
-    esfuerzo = _esfuerzo_para(model, pedido) if pedido else None
-    # Antes esto era "qwen/qwen3-32b" (modelo deprecado por Groq en jun 2026),
-    # así que qwen/qwen3.8-27b NO entraba acá y se quedaba sin
-    # reasoning_format="hidden": el texto del pensamiento volvía DENTRO de la
-    # respuesta y se comía max_tokens antes de llegar a contestar.
-    if model.startswith("qwen/"):
-        kwargs["reasoning_format"] = "hidden"
-        if esfuerzo:
-            kwargs["reasoning_effort"] = esfuerzo
-    elif model.startswith("openai/gpt-oss"):
-        # `include_reasoning=False` NO alcanza: con eso los gpt-oss devolvían
-        # la cadena de pensamiento entera DENTRO de `content`, en inglés y con
-        # la respuesta real pegada al final, y el TTS lo leía en voz alta.
-        # El que de verdad la oculta es `reasoning_format`, igual que en Qwen.
-        kwargs["reasoning_format"] = "hidden"
-        kwargs["include_reasoning"] = False
-        if esfuerzo:
-            kwargs["reasoning_effort"] = esfuerzo
-    # Familia desconocida: no se manda NADA de razonamiento. Antes acá se
-    # colaba `reasoning_effort` a cualquier modelo, y los que no razonan
-    # —llama-3.3-70b-versatile, por ejemplo— contestan HTTP 400 al recibirlo.
-    # Eso importa justo ahora que la cadena se ensancha con modelos de otras
-    # familias: un 400 en un eslabón de respaldo se escucha como un error
-    # crudo en voz alta, que es peor que la respuesta algo peor de un modelo
-    # sin pensamiento. Si más adelante entra un razonador nuevo, se agrega su
-    # familia a `_EQUIVALENCIAS` y vuelve a recibir los parámetros.
-
-
-def _candidatos(principal: str, cadena: list[str], ultimo_uso: dict[str, float],
-                enfriamiento: float) -> list[str]:
-    """Orden en que se van a probar los modelos, del mejor al peor.
-
-    Rota ANTES de que Groq rechace, no después: si el modelo preferido se usó
-    hace menos de `enfriamiento` segundos es muy probable que su ventana de
-    tokens por minuto siga ocupada, y esperar el 429 para recién ahí saltar
-    costaría un viaje de red entero. Como acá lo que manda es la latencia, se
-    prefiere el segundo modelo antes que la espera.
-
-    Los que están en enfriamiento no se descartan: se mandan al final, para que
-    sigan sirviendo de última red si todos están calientes.
-    """
-    orden: list[str] = []
-    for m in [principal, *cadena]:
-        if m and m not in orden:
-            orden.append(m)
-    ahora = time.monotonic()
-    frios = [m for m in orden if ahora - ultimo_uso.get(m, -1e9) >= enfriamiento]
-    calientes = [m for m in orden if m not in frios]
-    return frios + calientes
-
-
-def _coste_aproximado(mensaje: Any) -> int:
-    """Tokens estimados de un mensaje ya convertido al formato de Groq.
-
-    Solo se usa para decidir el recorte, así que alcanza con una estimación
-    conservadora: pasarse un poco de largo es inofensivo, quedarse corto no.
-    """
-    total = len(str(mensaje.get("content") or ""))
-    for llamada in mensaje.get("tool_calls") or ():
-        total += len(json_dumps(llamada))
-    return int(total / CHARS_PER_TOKEN) + 4  # +4 por el envoltorio del rol
-
-
-def _recortar_historial(messages: list, presupuesto: int) -> list:
-    """Deja el prompt de sistema y los turnos más recientes que entren.
-
-    El límite de Groq cuenta ENTRADA + SALIDA por minuto, y la petición crece
-    en cada turno porque el historial entero se reenvía. Sin recorte, la
-    conversación termina superando el límite y a partir de ahí falla SIEMPRE
-    (no de a ratos): por eso antes se "arreglaba" sola al reiniciar, que es
-    cuando Home Assistant descarta el conversation_id.
-
-    Se descartan turnos viejos ENTEROS, nunca pedazos de un mensaje.
-    """
-    sistema = [m for m in messages if m.get("role") == "system"]
-    resto = [m for m in messages if m.get("role") != "system"]
-
-    disponible = presupuesto - sum(_coste_aproximado(m) for m in sistema)
-    if disponible <= 0:
-        # El prompt de sistema solo ya no entra: no hay nada que recortar que
-        # ayude, y mandar la conversación vacía sería peor que dejarla pasar.
-        LOGGER.warning(
-            "El prompt de sistema (~%d tokens) supera el presupuesto de %d; "
-            "no se recorta nada",
-            presupuesto - disponible, presupuesto,
-        )
-        return messages
-
-    ventana: list = []
-    for mensaje in reversed(resto):
-        coste = _coste_aproximado(mensaje)
-        if coste > disponible:
-            break
-        disponible -= coste
-        ventana.insert(0, mensaje)
-
-    # Una ventana que empiece por un resultado de herramienta, o por un
-    # assistant cuyas tool_calls quedaron fuera, es un JSON inválido para la
-    # API. Se recorta hasta el primer mensaje de usuario, que siempre es un
-    # corte limpio.
-    while ventana and ventana[0].get("role") != "user":
-        ventana.pop(0)
-
-    if len(ventana) < len(resto):
-        LOGGER.debug(
-            "Historial recortado: %d de %d mensajes (presupuesto %d tokens)",
-            len(ventana), len(resto), presupuesto,
-        )
-
-    return sistema + ventana
+    """Registra la entidad de conversación de la entrada."""
+    async_add_entities([GroqConversationEntity(config_entry)])
 
 
 class GroqConversationEntity(
     conversation.ConversationEntity, conversation.AbstractConversationAgent
 ):
-    """Groq conversation agent."""
+    """Agente de conversación de Groq con enrutadores en paralelo y cadena de respaldo."""
 
     _attr_has_entity_name = True
     _attr_name = None
 
     def __init__(self, entry: GroqConfigEntry) -> None:
-        """Initialize the agent."""
+        """Guarda la entrada y el registro de cuándo se usó cada modelo."""
         self.entry = entry
-        # Cuándo se usó por última vez cada modelo, para rotar la cadena de
-        # respaldo sin esperar a que Groq devuelva un 429.
+        # Cuándo se usó por última vez cada modelo, para rotar la cadena ANTES
+        # de que Groq devuelva un 429. Se pierde entero cada vez que el usuario
+        # guarda las opciones (el listener recarga la entrada y recrea la
+        # entidad), y está bien: lo peor que pasa es un 429 evitable en el
+        # primer turno después de tocar la config.
         self._ultimo_uso: dict[str, float] = {}
         self._attr_unique_id = entry.entry_id
         self._attr_device_info = dr.DeviceInfo(
@@ -487,6 +106,11 @@ class GroqConversationEntity(
             model="Groq Cloud",
             entry_type=dr.DeviceEntryType.SERVICE,
         )
+        # Es una propiedad de la ENTRADA, no del turno: dice si el usuario
+        # configuró un API de asistente, no si el enrutador de casa lo va a
+        # usar en esta pregunta. El enrutador NO la toca; si dependiera del
+        # turno, la tarjeta de Assist parpadearía entre "controla la casa" y
+        # "no controla la casa" según lo que se le pregunte.
         if self.entry.options.get(CONF_LLM_HASS_API):
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL
@@ -494,31 +118,154 @@ class GroqConversationEntity(
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
-        """Return a list of supported languages."""
+        """Todos los idiomas: quien traduce es el modelo, no la integración."""
         return MATCH_ALL
 
     async def async_added_to_hass(self) -> None:
-        """When entity is added to Home Assistant."""
+        """Se registra como agente de conversación."""
         await super().async_added_to_hass()
         conversation.async_set_agent(self.hass, self.entry, self)
 
     async def async_will_remove_from_hass(self) -> None:
-        """When entity will be removed from Home Assistant."""
+        """Se da de baja como agente de conversación."""
         conversation.async_unset_agent(self.hass, self.entry)
         await super().async_will_remove_from_hass()
+
+    def _nombres_expuestos(self) -> list[str]:
+        """Los nombres de las entidades expuestas a conversación.
+
+        Es lo único que ve el enrutador de casa de la instalación: los NOMBRES
+        y nada más. El volcado YAML completo con áreas y alias es justamente lo
+        que se está tratando de ahorrar, así que mandárselo al enrutador sería
+        pagar dos veces el precio que se quiere evitar.
+
+        El cálculo es síncrono y sin red, así que no cuesta nada dentro del
+        turno. Ante cualquier problema devuelve la lista vacía en vez de
+        levantar: el enrutador ya es fail-safe hacia "sí, conservá las
+        herramientas", así que quedarse sin nombres degrada la decisión pero no
+        deja al usuario sin control de la casa.
+        """
+        try:
+            from homeassistant.components.homeassistant.llm import (  # noqa: PLC0415
+                async_get_exposed_entities,
+            )
+
+            expuestas = async_get_exposed_entities(
+                self.hass, "conversation", include_state=False
+            )
+            nombres = [
+                str(datos["names"])
+                for datos in (expuestas or {}).values()
+                if isinstance(datos, dict) and datos.get("names")
+            ]
+        except ImportError:
+            # `async_get_exposed_entities` se mudó hace poco de `helpers/llm.py`
+            # a `components/homeassistant/llm.py`. Si el core la vuelve a mover,
+            # abajo está la API que él mismo usa por debajo, que lleva mucho más
+            # tiempo estable.
+            LOGGER.debug("Sin async_get_exposed_entities; uso el plan B")
+            return self._nombres_por_estado()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("No pude leer las entidades expuestas", exc_info=True)
+            return self._nombres_por_estado()
+        return nombres
+
+    def _nombres_por_estado(self) -> list[str]:
+        """Plan B: filtra `hass.states` con `async_should_expose`."""
+        try:
+            from homeassistant.components.homeassistant.exposed_entities import (  # noqa: PLC0415
+                async_should_expose,
+            )
+
+            return [
+                estado.name
+                for estado in self.hass.states.async_all()
+                if async_should_expose(self.hass, "conversation", estado.entity_id)
+            ]
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Tampoco pude listar por estado", exc_info=True)
+            return []
+
+    def _resultado_de_error(
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+        texto: str,
+    ) -> conversation.ConversationResult:
+        """Un resultado de error hablado, sin agregar contenido de asistente.
+
+        Volver por acá no agrega nada al chat log por su cuenta. Home Assistant
+        descarta el turno entero comparando si el último elemento del historial
+        sigue siendo el que había al entrar, así que el mensaje del usuario que
+        disparó el error no queda pegado reenviándose en todos los turnos
+        siguientes.
+
+        La garantía vale MIENTRAS el turno no haya ejecutado ninguna
+        herramienta. Si el bucle ya dio una vuelta, `async_add_assistant_content`
+        dejó su AssistantContent con las `tool_calls` y el ToolResultContent
+        correspondiente, el último elemento ya cambió y el descarte no ocurre:
+        el turno queda en el historial con la acción que de verdad se ejecutó
+        sobre la casa, que es lo correcto —deshacerla no es opción— pero no es
+        lo que decía este docstring.
+        """
+        respuesta = intent.IntentResponse(language=user_input.language)
+        respuesta.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, texto)
+        return conversation.ConversationResult(
+            response=respuesta, conversation_id=chat_log.conversation_id
+        )
 
     async def _async_handle_message(
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
     ) -> conversation.ConversationResult:
-        """Process the user input and call the API."""
+        """Atiende un turno: dos enrutadores en paralelo y después la llamada final."""
         options = self.entry.options
+        cliente = self.entry.runtime_data.groq
+        ajustes = _ajustes_enrutadores(options)
+
+        # PRIMERA conversión del historial, más la lista de entidades expuestas.
+        # Las dos cosas existen SOLO para armarle la entrada al enrutador de
+        # casa, así que no se pagan cuando está apagado: una instalación que
+        # viene de la versión anterior lo tiene en falso, y ahí el turno tiene
+        # que ser indistinguible del de antes —lo que incluye no hacer trabajo
+        # que antes no se hacía. Recorrer `hass.states` entero es barato, pero
+        # es barato POR TURNO, y este código corre en cada frase que se dice.
+        contexto = ""
+        expuestas: list[str] = []
+        if ajustes["casa_activo"]:
+            # En este punto `content[0]` todavía es el prompt de sistema del
+            # turno ANTERIOR, porque `async_provide_llm_data` no corrió: esta
+            # lista NO sirve para pedirle nada al modelo. Y hacen falta los DOS
+            # lados de la conversación: "apagala" no se puede clasificar sin ver
+            # el "sí, una" que contestó la IA antes.
+            contexto = _ultimos_turnos(
+                _chat_log_to_messages(chat_log), TURNOS_CONTEXTO_CASA
+            )
+            expuestas = self._nombres_expuestos()
+
+        # Los dos enrutadores tienen que terminar ANTES de tocar el chat log:
+        # su veredicto es lo que decide qué se le pasa a
+        # `async_provide_llm_data`, y esa llamada tiene que ser una sola por
+        # turno y la primera cosa que toque el log.
+        casa, razon = await _decidir_enrutadores(
+            cliente,
+            ajustes,
+            user_input.text,
+            expuestas,
+            contexto,
+        )
 
         try:
             await chat_log.async_provide_llm_data(
                 user_input.as_llm_context(DOMAIN),
-                options.get(CONF_LLM_HASS_API),
+                # Pasar None acá no borra solo las herramientas: borra también
+                # el `api_prompt`, que es donde va el volcado YAML de todas las
+                # entidades expuestas con su área. Por eso el enrutador de casa
+                # pregunta "¿tiene que ver con la casa?" y no "¿es una orden?":
+                # sin ese bloque, "¿tengo luces en el dormitorio?" (que no es
+                # una orden) se contesta mal.
+                options.get(CONF_LLM_HASS_API) if casa[0] else None,
                 options.get(CONF_PROMPT),
                 user_input.extra_system_prompt,
             )
@@ -526,310 +273,312 @@ class GroqConversationEntity(
             return err.as_conversation_result()
 
         llm_api = chat_log.llm_api
-        tools: list[ChatCompletionToolParam] | None = None
+        tools: list | None = None
         if llm_api:
-            tools = [
-                _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
-            ]
-            # Fix #25: Groq API limits tools to 128 per request
-            if len(tools) > 128:
-                LOGGER.warning(
-                    "Too many tools (%d) for Groq API, truncating to 128",
-                    len(tools),
-                )
-                tools = tools[:128]
+            tools = _limitar_herramientas(
+                [_format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools]
+            )
 
+        # SEGUNDA conversión, a propósito. Recién ahora `content[0]` tiene el
+        # prompt de sistema de ESTE turno, que es el que corresponde mandar.
+        # Convertir es barato; mandar el prompt del turno anterior no lo es.
+        messages = _chat_log_to_messages(chat_log)
+        if not tools:
+            # Ir sin herramientas obliga a sacar también los `role="tool"` y
+            # las `tool_calls` viejas: un resultado de herramienta sin su
+            # petición es un 400. La limpieza va sobre los dicts de Groq y
+            # NUNCA sobre `chat_log.content`, que es la lista que HA persiste y
+            # cuyos elementos son dataclasses frozen.
+            #
+            # La guarda mira si el turno LLEVA herramientas, no el veredicto del
+            # enrutador, y la diferencia importa: `tools` también queda vacío
+            # cuando `llm_hass_api` no está configurado, y ahí el veredicto vale
+            # "sí" (con el enrutador apagado es su valor de reposo). Atarla al
+            # veredicto dejaba ese camino sin limpiar, con un historial que
+            # todavía puede traer resultados de herramienta de cuando la API sí
+            # estaba puesta. Mirar el efecto en vez de la causa cubre los dos.
+            messages = _sin_herramientas(messages)
+        # Limpiar primero y recortar después, en ese orden: al revés el
+        # presupuesto se calibraría contra mensajes que están por desaparecer, y
+        # la regla de "la ventana empieza en un user" quedaría aplicada sobre
+        # una lista que después cambia.
         messages = _recortar_historial(
-            _chat_log_to_messages(chat_log),
-            options.get(CONF_HISTORY_BUDGET, RECOMMENDED_HISTORY_BUDGET),
+            messages, options.get(CONF_HISTORY_BUDGET, RECOMMENDED_HISTORY_BUDGET)
         )
 
-        LOGGER.debug("Prompt: %s", messages)
-        LOGGER.debug("Tools: %s", tools)
+        # El enrutador de razonamiento no elige CUÁNTO piensa el modelo: elige
+        # SI piensa. El cuánto sale del campo del principal, y ese campo vacío
+        # significa "no configurado" (se manda reasoning_format="hidden" y
+        # ningún reasoning_effort), que no es lo mismo que mandar el máximo.
+        # Medido: el titular contesta pensando en 120-180 tokens; el suplente
+        # quema los 1200 razonando y vuelve vacío.
+        esfuerzo = options.get(CONF_REASONING_EFFORT) if razon[0] else "none"
+
+        principal = options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
+        cadena = list(options.get(CONF_MODEL_CHAIN) or [])
+        enfriamiento = float(
+            options.get(CONF_MODEL_COOLDOWN, RECOMMENDED_MODEL_COOLDOWN)
+        )
+
+        # El diccionario de la petición se arma UNA SOLA VEZ por turno. Antes se
+        # reconstruía desde `options` en cada vuelta del bucle de herramientas,
+        # así que el `max_tokens` que `_pedir_encogiendo` había bajado por un
+        # 413 se perdía en la iteración siguiente y el 413 volvía a pasar,
+        # vuelta tras vuelta, hasta agotar las diez.
+        model_kwargs: dict[str, Any] = {
+            "messages": messages,
+            "tools": tools or NOT_GIVEN,
+            "max_tokens": options.get(CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS),
+            "top_p": options.get(CONF_TOP_P, RECOMMENDED_TOP_P),
+            "temperature": options.get(CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE),
+            "user": chat_log.conversation_id,
+        }
+
+        LOGGER.debug("Mensajes: %s", messages)
+        LOGGER.debug("Herramientas: %s", tools)
         trace.async_conversation_trace_append(
             trace.ConversationTraceEventType.AGENT_DETAIL,
             {"messages": messages, "tools": llm_api.tools if llm_api else None},
         )
 
-        clientes = self.entry.runtime_data
+        # Una sola vez por turno se puede pasar a modo texto: o porque Groq
+        # rechazó la tool_call con `tool_use_failed`, o porque los argumentos
+        # que devolvió el modelo no son JSON. Dos veces sería quedarse dando
+        # vueltas sin herramientas y sin nada nuevo que probar.
+        respaldo_sin_herramientas = False
 
-        # To prevent infinite loops, we limit the number of iterations
-        tools_fallback_attempted = False
         for _iteration in range(MAX_TOOL_ITERATIONS):
             try:
-                # `model` va cambiando al recorrer la cadena; `principal`
-                # guarda cuál es el titular, que es lo que decide la política
-                # de razonamiento y no puede perderse en el camino.
-                principal = options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL)
-                model = principal
-                model_kwargs: dict[str, Any] = {
-                    "messages": messages,
-                    "tools": tools or NOT_GIVEN,
-                    "max_tokens": options.get(CONF_MAX_TOKENS, RECOMMENDED_MAX_TOKENS),
-                    "top_p": options.get(CONF_TOP_P, RECOMMENDED_TOP_P),
-                    "temperature": options.get(CONF_TEMPERATURE, RECOMMENDED_TEMPERATURE),
-                    "user": chat_log.conversation_id,
-                }
-
-                cadena = list(options.get(CONF_MODEL_CHAIN) or [])
+                # Se recalculan en cada vuelta a propósito: `self._ultimo_uso`
+                # se va marcando dentro de `_responder_con_cadena`, así que la
+                # segunda llamada del mismo turno ya sabe qué modelo acaba de
+                # gastar su ventana.
                 candidatos = _candidatos(
-                    model, cadena, self._ultimo_uso,
-                    float(options.get(CONF_MODEL_COOLDOWN,
-                                      RECOMMENDED_MODEL_COOLDOWN)),
+                    principal, cadena, self._ultimo_uso, enfriamiento
                 )
-                # Cloudflare va SIEMPRE al final y fuera de la rotación por
-                # enfriamiento: es la red de última instancia, no un escalón
-                # más. Es más lento, así que solo se usa si Groq no da.
-                if clientes.hay_cf:
-                    candidatos.append(PREFIJO_CF + options.get(
-                        CONF_CF_MODEL, RECOMMENDED_CF_MODEL))
-                result = None
-                for pos, candidato in enumerate(candidatos):
-                    es_cf = candidato.startswith(PREFIJO_CF)
-                    nombre = candidato[len(PREFIJO_CF):] if es_cf else candidato
-                    model_kwargs["model"] = nombre
-                    if es_cf:
-                        # Cloudflare no documenta reasoning_effort ni
-                        # reasoning_format; mandarlos sería arriesgar un 400
-                        # justo cuando es el último recurso que queda.
-                        for clave in ("reasoning_format", "reasoning_effort",
-                                      "include_reasoning"):
-                            model_kwargs.pop(clave, None)
-                    else:
-                        # El principal puede reaparecer más abajo en la
-                        # rotación cuando está en enfriamiento; lo que decide
-                        # la política es QUÉ modelo es, no en qué puesto entró.
-                        _aplicar_razonamiento(
-                            model_kwargs, nombre, options,
-                            es_principal=(nombre == principal))
-                    try:
-                        result = await _pedir_encogiendo(
-                            clientes, model_kwargs, es_cf, candidato)
-                    except groq.APIStatusError as err:
-                        limitado = (err.status_code in (413, 429)
-                                    or "rate_limit" in str(err))
-                        # El modelo se marca como usado igual al fallar: su
-                        # ventana de tokens está ocupada, que es justo lo que
-                        # hay que recordar para no volver a elegirlo ya mismo.
-                        self._ultimo_uso[candidato] = time.monotonic()
-                        if limitado and pos + 1 < len(candidatos):
-                            # Un 413 que llega hasta acá ya se encogió todo lo
-                            # que se podía, así que rotar es lo último que
-                            # queda aunque no sea probable que ayude.
-                            LOGGER.warning(
-                                "%s no pudo (HTTP %s: %s), salto a %s sin "
-                                "esperar", candidato, err.status_code,
-                                _detalle_error(err), candidatos[pos + 1],
-                            )
-                            continue
-                        raise
-                    self._ultimo_uso[candidato] = time.monotonic()
+                if not candidatos:
+                    # Sin ningún modelo válido no hay a quién preguntarle. Se
+                    # corta acá y no en `_responder_con_cadena` porque este es
+                    # el único lugar que puede convertirlo en algo que el
+                    # usuario escuche: una excepción que no sea
+                    # HomeAssistantError se escapa de `async_converse` y rompe
+                    # el pipeline entero de Assist, no solo este turno.
+                    LOGGER.error(
+                        "No hay ningún modelo configurado: revisá el modelo "
+                        "principal y la cadena de respaldo en las opciones."
+                    )
+                    return self._resultado_de_error(
+                        user_input,
+                        chat_log,
+                        "Perdón, no tengo ningún modelo configurado.",
+                    )
 
-                    # Se reintenta UNA vez sin pensamiento. Una respuesta más
-                    # seca es infinitamente mejor que el silencio, y volver a
-                    # preguntarle al mismo modelo sale más barato que saltar:
-                    # el siguiente de la cadena suele ser peor, y el salto
-                    # gasta la ventana de otro modelo que quizá haga falta
-                    # después. No aplica a Cloudflare, que va sin razonamiento.
-                    if not es_cf and _vacia_por_truncado(result):
-                        LOGGER.warning(
-                            "%s gastó los %s tokens de max_tokens pensando y "
-                            "volvió vacío; repito sin pensamiento",
-                            candidato, model_kwargs["max_tokens"],
-                        )
-                        _aplicar_razonamiento(
-                            model_kwargs, nombre, options, forzar="none",
-                            es_principal=(nombre == principal))
-                        try:
-                            result = await _pedir(clientes, model_kwargs, es_cf)
-                        except groq.APIStatusError as err:
-                            # Sin cupo para el reintento: nos quedamos con el
-                            # vacío y que decida el salto de abajo.
-                            LOGGER.warning(
-                                "el reintento sin pensamiento de %s tampoco "
-                                "entró (HTTP %s)", candidato, err.status_code,
-                            )
-                        self._ultimo_uso[candidato] = time.monotonic()
+                result = await _responder_con_cadena(
+                    cliente,
+                    model_kwargs,
+                    candidatos,
+                    principal,
+                    esfuerzo,
+                    self._ultimo_uso,
+                    TOPE_MINIMO_TOKENS,
+                )
 
-                    if _vacia_por_truncado(result) and pos + 1 < len(candidatos):
-                        LOGGER.warning(
-                            "%s sigue devolviendo vacío, salto a %s",
-                            candidato, candidatos[pos + 1],
-                        )
-                        continue
+                # WARNING y no INFO: el usuario tiene `logger: default: warning`
+                # en configuration.yaml y audita el cupo con ~/simular-assist/
+                # cupo.sh. Con INFO esta línea no existe para él, y sin ella hay
+                # que adivinar cuánto pesa cada petición contra los 8000 TPM.
+                if resumen := _resumen_uso(
+                    result, len(messages), str(model_kwargs.get("model") or principal)
+                ):
+                    LOGGER.warning("%s", resumen)
 
-                    model = candidato
-                    break
-                # Sin esto hay que adivinar cuánto pesa cada petición. El
-                # límite de Groq es por minuto contando entrada + salida, así
-                # que estos tres números son los que dicen si el recorte del
-                # historial está bien calibrado o no.
-                if (uso := getattr(result, "usage", None)) is not None:
-                    # cached_tokens es EL número que decide si conviene partir
-                    # el trabajo en dos modelos: los tokens cacheados no cuentan
-                    # contra el límite por minuto. Si se queda cerca de 0, el
-                    # caché no está pegando y no hay ahorro que perseguir.
-                    detalle = getattr(uso, "prompt_tokens_details", None)
-                    cacheados = getattr(detalle, "cached_tokens", None)
-                    eleccion = (result.choices or [None])[0]
-                    motivo = getattr(eleccion, "finish_reason", None)
-                    texto = getattr(getattr(eleccion, "message", None),
-                                    "content", None) or ""
-                    # Llegar acá vacío significa que ya se probó todo: cada
-                    # modelo de la cadena, y cada uno también sin pensamiento.
-                    # El usuario va a escuchar silencio y esto es lo único que
-                    # va a quedar escrito, así que va como ERROR.
-                    if _vacia_por_truncado(result):
-                        LOGGER.error(
-                            "RESPUESTA VACÍA tras agotar la cadena entera: %s "
-                            "gastó los %s tokens de max_tokens razonando y ni "
-                            "sin pensamiento llegó a contestar. Subí "
-                            "max_tokens o poné reasoning_effort en 'none'.",
-                            model, uso.completion_tokens,
-                        )
-                    # WARNING a propósito: la config de Juan tiene
-                    # `logger: default: warning`, así que con INFO esto no se
-                    # vería. Bajar a INFO cuando termine la medición.
-                    LOGGER.warning(
-                        "Groq OK [%s] — entrada %s (cacheados %s), salida %s, "
-                        "total %s (%s mensajes, fin=%s, %s car.)",
-                        model, uso.prompt_tokens, cacheados,
-                        uso.completion_tokens, uso.total_tokens, len(messages),
-                        motivo, len(texto),
+                if _vacia_por_truncado(result):
+                    # Llegar acá vacío significa que ya se probó todito: cada
+                    # modelo de la cadena, y cada uno también sin pensamiento. El
+                    # usuario va a escuchar silencio —no una excepción, silencio—
+                    # y esta línea es lo único que va a quedar escrito.
+                    LOGGER.error(
+                        "RESPUESTA VACÍA tras agotar la cadena entera: %s gastó "
+                        "los %s tokens de max_tokens razonando y ni sin "
+                        "pensamiento llegó a contestar. Subí max_tokens o poné "
+                        "el esfuerzo de razonamiento en 'none'.",
+                        model_kwargs.get("model"),
+                        model_kwargs.get("max_tokens"),
                     )
             except groq.BadRequestError as err:
-                # Fix #20: Smaller models may produce malformed tool calls;
-                # retry once without tools as a text-only fallback.
+                # Los modelos chicos devuelven de vez en cuando una tool_call
+                # que la propia API rechaza. Repetir el turno en modo texto da
+                # una respuesta peor, pero da una respuesta.
                 if (
                     "tool_use_failed" in str(err)
-                    and not tools_fallback_attempted
+                    and not respaldo_sin_herramientas
                     and tools
                 ):
                     LOGGER.warning(
-                        "Groq returned tool_use_failed error, retrying without "
-                        "tools: %s",
-                        err,
+                        "Groq devolvió tool_use_failed; repito sin herramientas: %s",
+                        _detalle_error(err),
                     )
-                    tools_fallback_attempted = True
+                    respaldo_sin_herramientas = True
                     tools = None
+                    # Este camino pasa de con-herramientas a sin-herramientas a
+                    # mitad de turno, igual que el enrutador de casa, así que
+                    # tiene que rehacer la lista: si no, quedan `role="tool"`
+                    # huérfanos de la vuelta anterior y la API los rechaza con
+                    # otro 400, esta vez sin respaldo que lo salve.
+                    messages = _sin_herramientas(messages)
+                    model_kwargs["messages"] = messages
+                    model_kwargs["tools"] = NOT_GIVEN
                     continue
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    f"Sorry, I had a problem talking to Groq: {err}",
+                return self._resultado_de_error(
+                    user_input,
+                    chat_log,
+                    f"Perdón, tuve un problema hablando con Groq: {_detalle_error(err)}",
                 )
-                return conversation.ConversationResult(
-                    response=intent_response, conversation_id=chat_log.conversation_id
-                )
-            except groq.AuthenticationError as err:
-                # Fix #27: Better auth error messaging
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    "Sorry, Groq authentication failed. Please check your API key "
-                    "for leading/trailing whitespace or incorrect format.",
-                )
-                return conversation.ConversationResult(
-                    response=intent_response, conversation_id=chat_log.conversation_id
+            except groq.AuthenticationError:
+                return self._resultado_de_error(
+                    user_input,
+                    chat_log,
+                    "Perdón, Groq rechazó la clave de API. Fijate que no tenga "
+                    "espacios de más al principio o al final.",
                 )
             except groq.APIStatusError as err:
-                # Fix #19: Better error messaging for rate limit / payload errors
-                error_str = str(err)
-                if err.status_code == 413 or "rate_limit_exceeded" in error_str:
-                    # El texto de Groq trae los números concretos
-                    # ("Limit 8000, Requested 9234"). Sin loguearlo, el mensaje
-                    # amable de abajo los tapa y no queda con qué calibrar.
+                if err.status_code in (413, 429) or "rate_limit" in str(err):
+                    # `_detalle_error` y no `str(err)`: el cuerpo trae "Limit
+                    # 8000, Requested 8441", que son los dos números con los que
+                    # se calibran max_tokens y el presupuesto de historial. Con
+                    # el código de estado solo, un 413 y un 429 se leen igual
+                    # siendo problemas opuestos: uno se arregla pidiendo menos,
+                    # el otro esperando.
                     LOGGER.error(
-                        "Groq RECHAZÓ (HTTP %s) con %s mensajes tras el "
-                        "recorte. Respuesta cruda: %s",
-                        err.status_code, len(messages), error_str,
+                        "Groq RECHAZÓ (HTTP %s) con %s mensajes tras el recorte: %s",
+                        err.status_code,
+                        len(messages),
+                        _detalle_error(err),
                     )
-                    intent_response = intent.IntentResponse(
-                        language=user_input.language
+                    return self._resultado_de_error(
+                        user_input,
+                        chat_log,
+                        "Perdón, Groq rechazó la petición. Probá bajando "
+                        "max_tokens en las opciones de la integración, o sumá "
+                        "otro modelo a la cadena de respaldo.",
                     )
-                    intent_response.async_set_error(
-                        intent.IntentResponseErrorCode.UNKNOWN,
-                        "Sorry, Groq rejected the request. "
-                        "Try reducing max_tokens in the integration options or "
-                        "upgrading your Groq API tier.",
-                    )
-                    return conversation.ConversationResult(
-                        response=intent_response,
-                        conversation_id=chat_log.conversation_id,
-                    )
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    f"Sorry, I had a problem talking to Groq: {err}",
-                )
-                return conversation.ConversationResult(
-                    response=intent_response, conversation_id=chat_log.conversation_id
+                return self._resultado_de_error(
+                    user_input,
+                    chat_log,
+                    f"Perdón, tuve un problema hablando con Groq: {_detalle_error(err)}",
                 )
             except groq.GroqError as err:
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    f"Sorry, I had a problem talking to Groq: {err}",
-                )
-                return conversation.ConversationResult(
-                    response=intent_response, conversation_id=chat_log.conversation_id
+                return self._resultado_de_error(
+                    user_input,
+                    chat_log,
+                    f"Perdón, tuve un problema hablando con Groq: {err}",
                 )
 
-            LOGGER.debug("Response %s", result)
-            response = result.choices[0].message
+            # Lectura tolerante del contenido: `_responder_con_cadena` puede
+            # devolver una respuesta vacía cuando ya se agotó todo, y romper acá
+            # con un AttributeError sonaría como un error hablado.
+            #
+            # Va por `_texto_de` y no por un getattr suelto para heredar su
+            # filtro de tipo. Un `content` que no sea texto —una lista de
+            # bloques, como devuelven algunas APIs— entraba crudo en el
+            # AssistantContent y de ahí a `async_set_speech`, así que el TTS
+            # terminaba tratando de pronunciar una estructura de datos. El
+            # `or None` conserva la distinción que usa el resto del turno:
+            # cadena vacía y "no hubo texto" son lo mismo acá.
+            texto = _texto_de(result) or None
 
-            groq_tool_calls = response.tool_calls or []
-            assistant_tool_calls = [
-                llm.ToolInput(
-                    id=tool_call.id,
-                    tool_name=tool_call.function.name,
-                    tool_args=json.loads(tool_call.function.arguments),
+            llamadas: list[llm.ToolInput] = []
+            malformada = False
+            for peticion in _peticiones_de_herramienta(result):
+                funcion = getattr(peticion, "function", None)
+                argumentos = _argumentos_de_herramienta(
+                    getattr(funcion, "arguments", None)
                 )
-                for tool_call in groq_tool_calls
-            ]
+                if argumentos is None:
+                    malformada = True
+                    break
+                llamadas.append(
+                    llm.ToolInput(
+                        id=peticion.id,
+                        tool_name=funcion.name,
+                        tool_args=argumentos,
+                    )
+                )
+
+            if malformada:
+                # Antes esto era un `json.loads` pelado: el JSONDecodeError
+                # salía fuera de todos los except del bucle y rompía el pipeline
+                # de Assist. Unos argumentos que no parsean son exactamente el
+                # mismo problema que un `tool_use_failed`, así que van por el
+                # mismo camino.
+                if respaldo_sin_herramientas or not tools:
+                    LOGGER.error(
+                        "El modelo devolvió argumentos de herramienta que no son "
+                        "JSON y ya se había probado el modo texto; abandono el turno."
+                    )
+                    return self._resultado_de_error(
+                        user_input,
+                        chat_log,
+                        "Perdón, no entendí la acción que quiso ejecutar el modelo.",
+                    )
+                LOGGER.warning(
+                    "Argumentos de herramienta malformados; repito sin herramientas"
+                )
+                respaldo_sin_herramientas = True
+                tools = None
+                messages = _sin_herramientas(messages)
+                model_kwargs["messages"] = messages
+                model_kwargs["tools"] = NOT_GIVEN
+                continue
 
             assistant_content = AssistantContent(
                 agent_id=self.entity_id,
-                content=response.content,
-                tool_calls=assistant_tool_calls or None,
+                content=texto,
+                tool_calls=llamadas or None,
             )
-
             messages.append(_assistant_content_to_message(assistant_content))
 
-            if not assistant_tool_calls:
+            if not llamadas:
                 chat_log.async_add_assistant_content_without_tools(assistant_content)
                 break
 
-            for tool_call in assistant_tool_calls:
-                LOGGER.debug(
-                    "Tool call: %s(%s)", tool_call.tool_name, tool_call.tool_args
-                )
-
             if llm_api is None:
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    "Tool call requested but no LLM API configured",
+                # Red que atrapa el caso nuevo: el enrutador de casa dijo que NO
+                # y el modelo pidió una herramienta igual. Sin este chequeo,
+                # `async_add_assistant_content` levanta
+                # ValueError("No LLM API configured"), que NO es
+                # HomeAssistantError: se escapa de `async_converse` y rompe el
+                # pipeline entero de Assist, no solo este turno.
+                LOGGER.warning(
+                    "El modelo pidió %d herramienta(s) en un turno resuelto sin "
+                    "control de la casa (motivo del enrutador: %s)",
+                    len(llamadas),
+                    casa[2],
                 )
-                return conversation.ConversationResult(
-                    response=intent_response,
-                    conversation_id=chat_log.conversation_id,
+                return self._resultado_de_error(
+                    user_input,
+                    chat_log,
+                    "Perdón, quise hacer algo en la casa pero este turno no "
+                    "tenía el control habilitado. Probá de nuevo.",
                 )
 
             async for tool_result_content in chat_log.async_add_assistant_content(
                 assistant_content
             ):
                 LOGGER.debug(
-                    "Tool response: %s -> %s",
+                    "Resultado de %s: %s",
                     tool_result_content.tool_name,
                     tool_result_content.tool_result,
                 )
+                # Dict plano y no el tipo del SDK: esta lista solo viaja hacia
+                # `_recortar_historial` y hacia la API, y las dos tratan los
+                # mensajes como dicts.
                 messages.append(
-                    ChatCompletionToolMessageParam(
-                        role="tool",
-                        tool_call_id=tool_result_content.tool_call_id,
-                        content=json_dumps(tool_result_content.tool_result),
-                    )
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_result_content.tool_call_id,
+                        "content": json_dumps(tool_result_content.tool_result),
+                    }
                 )
 
         return async_get_result_from_chat_log(user_input, chat_log)

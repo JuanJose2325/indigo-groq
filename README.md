@@ -1,4 +1,4 @@
-# Groq Cloud API — fork con cadena de respaldo
+# Groq Cloud API — fork con cadena de respaldo y enrutadores
 
 [![Abrir en HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=JuanJose2325&repository=indigo-groq&category=integration)
 
@@ -13,14 +13,15 @@ aguante el uso diario dentro del plan gratuito de Groq.
 El plan gratuito de Groq no es escaso en volumen, es escaso en **ráfagas**: el
 límite de tokens por minuto se cuenta sumando entrada más salida, y el historial
 entero de la conversación se reenvía en cada turno. Con la API de Assist metiendo
-además unos 4400 tokens de esquemas de herramientas en cada petición, una
-conversación normal supera el límite en pocos turnos — y a partir de ahí falla
-**siempre**, no de a ratos. Parecía arreglarse sola al reiniciar Home Assistant,
-que es justo cuando se descarta el `conversation_id`.
+además unos 4150 tokens de esquemas de herramientas en cada petición —el 52 % del
+techo de 8000 por minuto—, una conversación normal supera el límite en pocos
+turnos, y a partir de ahí falla **siempre**, no de a ratos. Parecía arreglarse
+sola al reiniciar Home Assistant, que es justo cuando se descarta el
+`conversation_id`.
 
 Por voz eso se nota mucho más que por texto: no hay indicador de carga, así que
 un silencio largo es indistinguible de un cuelgue y el usuario repite el comando,
-encadenando dos peticiones.
+encadenando dos peticiones contra el mismo cupo.
 
 Lo que agrega el fork:
 
@@ -29,10 +30,13 @@ Lo que agrega el fork:
 | **Recorte del historial** por presupuesto de tokens | Corta la conversación por turnos enteros para que la petición no crezca sin techo. Nunca deja resultados de herramienta huérfanos (eso es un 400). |
 | **Cadena de modelos de respaldo** | Los límites de Groq son *por modelo*: cada modelo de la cadena aporta su propia ventana de tokens por minuto. |
 | **Rotación preventiva por enfriamiento** | Cambia de modelo *antes* de que Groq devuelva un 429, para no pagar el viaje de red del rechazo. Un modelo en enfriamiento pasa al final de la lista, nunca se descarta. |
-| **Respaldo en Cloudflare Workers AI** | Red de última instancia. Ahí corre el mismo `qwen3.8-27b` y no hay límite de tokens por minuto, así que la calidad se mantiene; solo es más lento. |
-| **Traducción del esfuerzo de razonamiento** | Cada familia de modelos usa un vocabulario distinto (`default`/`none` en Qwen, `low`/`medium`/`high` en gpt-oss). Sin traducir, saltar de una a otra devuelve un 400 que el TTS terminaba leyendo en voz alta. |
-| **`reasoning_format: hidden`** en Qwen y gpt-oss | Sin esto, los modelos devolvían la cadena de pensamiento entera *dentro* de la respuesta, en inglés, y el TTS la leía. |
-| **Registro de consumo real** | Entrada, salida, tokens cacheados y `finish_reason` en cada petición. Sin eso hay que adivinar si el recorte está bien calibrado. |
+| **Enrutador de casa** (opcional) | Un modelo chico decide si la consulta tiene que ver con la casa. Cuando dice que no, el turno va sin el bloque de herramientas y se ahorran esos 4150 tokens. |
+| **Enrutador de razonamiento** (opcional) | Otro modelo chico decide si la consulta necesita pensar. Razonar de gusto devolvía respuestas vacías, porque los tokens de pensamiento salen del mismo presupuesto que la respuesta. |
+| **Encogido ante un 413** | Un rechazo por tamaño no se arregla rotando de modelo: al siguiente le llega la misma petición. Se baja el techo a la mitad, hasta un piso de 400, y se reintenta el mismo modelo. |
+| **Reintento sin pensamiento ante una respuesta vacía** | Si el modelo se gastó el presupuesto razonando y volvió mudo, se le repite la pregunta con el pensamiento apagado antes de abandonarlo. |
+| **Traducción del esfuerzo de razonamiento** | Cada familia usa un vocabulario distinto (`default`/`none` en Qwen, `low`/`medium`/`high` en gpt-oss). Sin traducir, saltar de una a otra devuelve un 400 que el TTS terminaba leyendo en voz alta. |
+| **`reasoning_format: hidden`** en Qwen y gpt-oss | Sin esto, los modelos devolvían la cadena de pensamiento entera *dentro* de la respuesta, en inglés, y el TTS la leía. La familia se detecta por prefijo del id, no por igualdad de nombre. |
+| **Registro de consumo real** | Entrada, salida, tokens cacheados y `finish_reason` en cada petición, en `warning`. Sin eso hay que adivinar si el recorte está bien calibrado. |
 | Traducción al español | Los campos nuevos aparecían con su nombre crudo en la interfaz. |
 
 ## Instalación
@@ -60,14 +64,53 @@ API**, y pegar la clave de API de [console.groq.com](https://console.groq.com).
 ## Opciones
 
 Además de las del proyecto original (instrucciones, modelo, tokens máximos,
-temperatura, top_p, control de Home Assistant, esfuerzo de razonamiento):
+temperatura, top_p, control de Home Assistant):
 
+- **Esfuerzo de razonamiento** — cuánto piensa el modelo principal *cuando*
+  piensa. Dejarlo vacío es un valor legítimo: significa «no configurado», y ahí
+  se manda `reasoning_format: hidden` sin ningún esfuerzo. Vacío **no** es lo
+  mismo que el máximo.
 - **Presupuesto del historial (tokens)** — cuánto historial se reenvía. Tiene que
   dejar sitio para los tokens máximos de respuesta *y*, si hay razonamiento
   activo, para los tokens de pensamiento, que salen de la misma bolsa.
-- **Modelos de respaldo** — lista, en orden de preferencia.
+- **Modelos de respaldo** — lista, en orden de preferencia. Los respaldos van
+  siempre sin pensamiento: medido acá, el principal contesta pensando en 120-180
+  tokens y el suplente quema los 1200 razonando y vuelve vacío.
 - **Enfriamiento por modelo (segundos)** — 0 desactiva la rotación preventiva.
-- **Cloudflare: ID de cuenta, token y modelo** — vacíos por defecto (desactivado).
+- **Enrutador de casa: activar, modelo, esfuerzo y umbral de confianza** —
+  apagado por defecto.
+- **Enrutador de razonamiento: activar, modelo, esfuerzo y umbral** — apagado por
+  defecto.
+
+Cada desplegable de esfuerzo se arma con la familia del modelo de **su** fila, y
+Home Assistant no vuelve a dibujar el formulario cuando cambiás un desplegable:
+si cambiaste el modelo, guardá y reabrí para ver los valores que le corresponden.
+
+### Los dos enrutadores
+
+Los dos vienen **apagados**, y con los dos apagados el comportamiento es el mismo
+que sin ellos: actualizar la integración no le cambia nada a una instalación que
+está andando.
+
+Cuando se prenden, corren **en paralelo** contra su propio modelo (o sea, contra
+otra ventana de cupo) antes de armar la petición principal, con un techo de 150
+tokens y 5 segundos cada uno.
+
+Sus tablas de fallo son **opuestas a propósito**:
+
+- **Casa: ante cualquier fallo conserva las herramientas.** Equivocarse hacia
+  «sí» solo gasta tokens; equivocarse hacia «no» deja al usuario sin poder
+  prender la luz. Solo puede ahorrar, nunca romper.
+- **Razonamiento: ante cualquier fallo no razona.** Pensar de más se come el
+  presupuesto de salida y devuelve la respuesta vacía, que por voz se escucha
+  como silencio.
+
+Y **apagado no es lo mismo que fallo**: el enrutador de razonamiento apagado
+*sí* piensa, con el esfuerzo configurado.
+
+Cada decisión deja una línea en `warning` con el modelo, el veredicto, la
+confianza, el motivo y los milisegundos que tardó, para poder auditar si el
+enrutador se está equivocando en vez de confiar en él a ciegas.
 
 ### Configuración de referencia
 
@@ -81,35 +124,32 @@ plan gratuito de Groq:
 | Tokens máximos | 1200 |
 | Presupuesto del historial | 2500 |
 | Enfriamiento | 60 s |
-| Esfuerzo de razonamiento | `default` (con «admite razonamiento» activado) |
-| Cloudflare | `@cf/qwen/qwen3.8-27b` |
-
-Con eso: mediana de aproximadamente 1 s en Groq y de 3,4 s cuando cae a
-Cloudflare, con picos ocasionales cerca de 20 s.
+| Esfuerzo de razonamiento | `default` |
+| Enrutadores | apagados |
 
 ### Cómo calibrar el presupuesto del historial
 
-Poner el registro en `debug` para `custom_components.groq_cloud_api` y mirar la
-línea `Groq OK`: trae entrada, salida, total y cuántos tokens vinieron de caché.
-Si el total se acerca al límite por minuto del modelo, bajar el presupuesto. Si
-aparece `RESPUESTA VACÍA por truncado`, el razonamiento se comió los tokens
-máximos antes de llegar a contestar: subir los tokens máximos o bajar el
-esfuerzo.
+El registro de consumo va en `warning`, así que se ve sin tocar la configuración
+del `logger`. Mirar la línea `Groq OK`: trae entrada, salida, total y cuántos
+tokens vinieron de caché. Si el total se acerca al límite por minuto del modelo,
+bajar el presupuesto. Si aparece `RESPUESTA VACÍA`, el razonamiento se comió los
+tokens máximos antes de llegar a contestar: subir los tokens máximos, bajar el
+esfuerzo, o prender el enrutador de razonamiento.
 
 ## Privacidad
 
 Esto manda lo que se le dice al asistente —y el estado de las entidades que
-tengas expuestas a Assist— a un servicio en la nube.
+tengas expuestas a Assist— a un servicio en la nube. Groq es el único proveedor
+al que se conecta la integración, y también es a quien se le consultan los dos
+enrutadores.
 
-- **Groq** es obligatorio: es el proveedor principal. Revisá sus condiciones
-  antes de usarlo, sobre todo en el plan gratuito.
-- **Cloudflare Workers AI** es **opcional y viene desactivado**. Solo se activa
-  si cargás a mano el ID de cuenta y el token. Si preferís que tus
-  conversaciones no salgan hacia un segundo proveedor, dejá esos campos vacíos:
-  la integración funciona igual, solo que sin red de última instancia.
+Cuando el enrutador de casa dice que la consulta no tiene que ver con la casa, el
+turno viaja **sin** el volcado de entidades expuestas: prenderlo manda menos
+datos, no más. Lo que sí ve el enrutador de casa son los **nombres** de esas
+entidades, y nada más: ni sus estados, ni sus áreas.
 
-Ninguna credencial se guarda en este repositorio: las dos se cargan desde la
-interfaz de Home Assistant.
+La clave de API no se guarda en este repositorio: se carga desde la interfaz de
+Home Assistant.
 
 ## Pruebas
 
@@ -117,23 +157,18 @@ interfaz de Home Assistant.
 pruebas/todas.sh
 ```
 
-28 comprobaciones sobre las tres funciones puras que concentran los fallos que
-más caro salieron: el recorte del historial, la rotación de la cadena y la
-traducción del esfuerzo. No hace falta pytest ni tener Home Assistant instalado
-— las pruebas leen `conversation.py` y extraen esas funciones del árbol de
-sintaxis, así que corren contra el código real: si alguien lo edita de más, se
-rompen.
+329 comprobaciones sobre las funciones puras que concentran los fallos que más
+caro salieron: el recorte y la limpieza del historial, la rotación de la cadena,
+la traducción del esfuerzo de razonamiento, la lectura de respuestas y errores,
+la máquina de estados del bucle de candidatos, las dos tablas de fallo de los
+enrutadores y la compatibilidad con la configuración vieja.
 
-## Herramientas
-
-`herramientas/probar-cloudflare.py` mide Cloudflare Workers AI por fuera de Home
-Assistant: latencia hasta el primer byte y su dispersión, si el modelo llama
-herramientas correctamente, si pega el caché y cuántas «neuronas» cuesta cada
-petición. Lee `CF_ACCOUNT_ID` y `CF_API_TOKEN` del entorno.
-
-```bash
-CF_ACCOUNT_ID=... CF_API_TOKEN=... python3 herramientas/probar-cloudflare.py
-```
+No hace falta pytest ni tener Home Assistant instalado: `pruebas/cargar.py` lee
+los módulos de la integración, se queda con los nodos del árbol de sintaxis que
+le interesan y los ejecuta con las pocas dependencias sustituidas. Corren contra
+el código real, así que si alguien lo edita de más, se rompen. Si una función
+pura se renombra o deja de ser de nivel superior, el cargador levanta un
+`AssertionError` en vez de saltearse la comprobación en silencio.
 
 ## Créditos
 
