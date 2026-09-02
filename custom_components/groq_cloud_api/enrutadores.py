@@ -505,6 +505,20 @@ async def _decidir_enrutadores(cliente: object, ajustes: dict, consulta: str,
         )
     resultados = dict(zip(claves, crudos))
 
+    # La excepción se convierte en un veredicto seguro más abajo y el turno
+    # sigue, que es lo correcto; pero si además no se escribe en ningún lado, el
+    # log solo dice "no contestó" y no hay forma de saber si fue un 400, un
+    # modelo que no existe en la cuenta o la red. Es la misma lección que costó
+    # horas con el 413: guardar el código de estado sin el mensaje deja dos
+    # problemas opuestos con la misma cara. Va en WARNING porque la instalación
+    # corre con `logger: default: warning` y en INFO no se vería.
+    for clave, crudo in resultados.items():
+        if isinstance(crudo, BaseException):
+            LOGGER.warning(
+                "el enrutador %s falló con %s: %s",
+                clave, type(crudo).__name__, str(crudo)[:300],
+            )
+
     if "casa" in resultados:
         casa = _veredicto_casa(resultados["casa"], ajustes["casa_umbral"])
         LOGGER.warning(
