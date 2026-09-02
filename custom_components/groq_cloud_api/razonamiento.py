@@ -152,12 +152,23 @@ def _aplicar_razonamiento(kwargs: dict, model: str, esfuerzo: str | None) -> Non
         if traducido:
             kwargs["reasoning_effort"] = traducido
     elif familia == "gpt-oss":
-        # include_reasoning=False NO alcanza: con eso los gpt-oss devolvían la
-        # cadena de pensamiento entera DENTRO de content, en inglés y con la
-        # respuesta real pegada al final. El que de verdad la oculta es
-        # reasoning_format, igual que en Qwen.
+        # Va SOLO reasoning_format, nunca acompañado de include_reasoning:
+        #
+        #     400 - cannot specify both `include_reasoning` and `reasoning_format`
+        #
+        # Medido contra la API el 2 sep 2026. El código traía los dos porque
+        # `include_reasoning=False` por su cuenta no alcanzaba —los gpt-oss
+        # devolvían la cadena de pensamiento entera DENTRO de content, en inglés
+        # y con la respuesta real pegada al final, y el TTS la leía— así que se
+        # agregó `reasoning_format` sin sacar el otro. Con los dos puestos, Groq
+        # rechaza la petición entera.
+        #
+        # Nunca se había visto porque esta rama jamás se ejecutó: la cadena de
+        # la instalación era toda Qwen. Los enrutadores fueron el primer gpt-oss
+        # que corrió de verdad, y fallaron 10 de 10 sin decir por qué. El que
+        # oculta el pensamiento es `reasoning_format`, igual que en Qwen; el
+        # otro sobra.
         kwargs["reasoning_format"] = "hidden"
-        kwargs["include_reasoning"] = False
         if traducido:
             kwargs["reasoning_effort"] = traducido
 

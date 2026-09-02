@@ -204,17 +204,23 @@ comprobar(
     aplicar(OSS, "default").get("reasoning_format") == "hidden",
 )
 
-# 12. En gpt-oss include_reasoning=False NO alcanza —con eso solo, devolvía la
-#     cadena de pensamiento entera dentro de content—, pero se manda igual junto
-#     con el formato. El que de verdad oculta es reasoning_format.
-comprobar(
-    "gpt-oss recibe además include_reasoning en falso",
-    aplicar(OSS, "default").get("include_reasoning") is False,
-)
-comprobar(
-    "Qwen no recibe include_reasoning, que no es de su familia",
-    "include_reasoning" not in aplicar(QWEN, "default"),
-)
+# 12. `include_reasoning` NO SE MANDA NUNCA, en ninguna familia. Es la
+#     comprobación que faltaba, y su ausencia costó que los dos enrutadores
+#     fallaran 10 de 10 contra la instalación real:
+#
+#         400 - cannot specify both `include_reasoning` and `reasoning_format`
+#
+#     El código mandaba los dos en gpt-oss porque `include_reasoning=False` solo
+#     no alcanzaba para ocultar el pensamiento, así que se sumó
+#     `reasoning_format` sin sacar el otro. Nadie lo notó porque la rama nunca
+#     se ejecutó: la cadena de la instalación era toda Qwen. Lo que oculta de
+#     verdad es `reasoning_format`; el otro sobra y encima rompe.
+for modelo in (OSS, OSS_CHICO, QWEN, QWEN_VIEJO):
+    for esfuerzo in ("default", "none", "low", "high", "", None):
+        comprobar(
+            f"{modelo} con esfuerzo {esfuerzo!r} no manda include_reasoning",
+            "include_reasoning" not in aplicar(modelo, esfuerzo),
+        )
 
 # 13. El esfuerzo que acompaña sale traducido al vocabulario propio de cada uno:
 #     es la composición con `_esfuerzo_para` la que se está comprobando.
@@ -278,9 +284,8 @@ for vacio in (None, ""):
         "reasoning_effort" not in aplicar(OSS, vacio),
     )
     comprobar(
-        f"esfuerzo {vacio!r} conserva el paquete completo de gpt-oss",
-        aplicar(OSS, vacio) == {"reasoning_format": "hidden",
-                                "include_reasoning": False},
+        f"esfuerzo {vacio!r} deja gpt-oss solo con el formato oculto",
+        aplicar(OSS, vacio) == {"reasoning_format": "hidden"},
     )
 
 # 15. El caso opuesto, que tiene que seguir coexistiendo: un valor de VERDAD
